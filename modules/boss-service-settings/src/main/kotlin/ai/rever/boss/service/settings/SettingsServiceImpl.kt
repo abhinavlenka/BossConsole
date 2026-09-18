@@ -6,11 +6,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -20,7 +25,9 @@ import java.util.concurrent.ConcurrentHashMap
  * In-memory map is the runtime source of truth; disk is loaded once at
  * startup and written synchronously on every mutation.
  */
-class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBase() {
+class SettingsServiceImpl(
+    private val storageFile: File = File(System.getProperty("user.home"), ".boss/settings.json"),
+) : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBase() {
     private val logger = LoggerFactory.getLogger(SettingsServiceImpl::class.java)
 
     @Serializable
@@ -36,14 +43,15 @@ class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBa
             ignoreUnknownKeys = true
             prettyPrint = true
         }
-    private val settingsFile =
-        File(System.getProperty("user.home"), ".boss/settings.json")
-            .also { it.parentFile.mkdirs() }
-
     private val settings = ConcurrentHashMap<String, SettingValue>()
     private val changes = MutableSharedFlow<SettingValue>(extraBufferCapacity = 64)
 
+    // Serializes every setSetting's map mutation against its disk save, so concurrent gRPC
+    // callers can't both reach saveToDisk() at once and race each other's writeText.
+    private val mutations = Mutex()
+
     init {
+        storageFile.parentFile?.mkdirs()
         loadFromDisk()
     }
 
@@ -56,9 +64,9 @@ class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBa
     // ---- Disk persistence helpers ----
 
     private fun loadFromDisk() {
-        if (!settingsFile.exists()) return
+        if (!storageFile.exists()) return
         try {
-            val list = json.decodeFromString<List<PersistedSetting>>(settingsFile.readText())
+            val list = json.decodeFromString<List<PersistedSetting>>(storageFile.readText())
             list.forEach { ps ->
                 settings[storageKey(ps.namespace, ps.key)] =
                     SettingValue
@@ -76,7 +84,11 @@ class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBa
         }
     }
 
+    // Callers must hold `mutations` — writes a fresh temp file and replaces settingsFile
+    // atomically via ATOMIC_MOVE, so a crash or I/O failure mid-write never leaves a
+    // truncated/partial settings.json for the next loadFromDisk() to choke on.
     private fun saveToDisk() {
+        val temp = Files.createTempFile(storageFile.parentFile.toPath(), "${storageFile.name}.", ".tmp")
         try {
             val list =
                 settings.values.map { sv ->
@@ -87,9 +99,12 @@ class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBa
                         updatedAt = sv.updatedAt,
                     )
                 }
-            settingsFile.writeText(json.encodeToString(list))
+            Files.writeString(temp, json.encodeToString(list))
+            Files.move(temp, storageFile.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
         } catch (e: Exception) {
             logger.warn("Failed to persist settings: {}", e.message)
+        } finally {
+            Files.deleteIfExists(temp)
         }
     }
 
@@ -118,8 +133,10 @@ class SettingsServiceImpl : SettingsServiceGrpcKt.SettingsServiceCoroutineImplBa
                     .setNamespace(request.namespace)
                     .setUpdatedAt(System.currentTimeMillis())
                     .build()
-            settings[storageKey(request.namespace, request.key)] = value
-            saveToDisk()
+            mutations.withLock {
+                settings[storageKey(request.namespace, request.key)] = value
+                saveToDisk()
+            }
             changes.tryEmit(value)
             value
         }
