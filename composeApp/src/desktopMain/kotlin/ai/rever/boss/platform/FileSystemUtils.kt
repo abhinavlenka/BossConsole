@@ -33,7 +33,7 @@ object FileSystemUtils {
      */
     fun openFile(filePath: String) {
         try {
-            val osName = System.getProperty("os.name").lowercase()
+            val osName = System.getProperty("os.name").orEmpty()
             val file = File(filePath)
 
             if (!file.exists()) {
@@ -41,23 +41,12 @@ object FileSystemUtils {
                 return
             }
 
-            when {
-                osName.contains("mac") -> {
-                    Runtime.getRuntime().exec(arrayOf("open", file.absolutePath))
-                }
-
-                osName.contains("windows") -> {
-                    Runtime.getRuntime().exec(arrayOf("cmd", "/c", "start", "", file.absolutePath))
-                }
-
-                osName.contains("linux") -> {
-                    Runtime.getRuntime().exec(arrayOf("xdg-open", file.absolutePath))
-                }
-
-                else -> {
-                    logger.warn(LogCategory.FILE, "Open file not supported on this OS", mapOf("os" to osName))
-                }
+            val command = openCommand(osName, file.absolutePath)
+            if (command == null) {
+                logger.warn(LogCategory.FILE, "Open file not supported on this OS", mapOf("os" to osName))
+                return
             }
+            Runtime.getRuntime().exec(command)
         } catch (e: IOException) {
             logger.warn(LogCategory.FILE, "Failed to open file", error = e)
         }
@@ -291,4 +280,34 @@ object FileSystemUtils {
             )
             false
         }
+}
+
+/**
+ * The command that opens [path] with the OS default application, or null on an OS with no
+ * launcher of its own.
+ *
+ * **Windows goes through Explorer, not `cmd /c start`.** A command line handed to `cmd` is
+ * re-parsed by the shell, and the JDK quotes an argument only when it contains a space or a tab -
+ * the same rule `revealInFileManager` documents from the other direction ("when the path contains
+ * spaces the JDK quotes the ENTIRE token"). So `&`, `^`, `|`, `<` and `>` reached `cmd` unquoted
+ * in any path without a space: `C:\Users\dev\Downloads\R&D.pdf` ran
+ * `start "" C:\Users\dev\Downloads\R` and took `D.pdf` as a second command. A path that
+ * happened to contain a space was quoted whole and worked, which is why this survived.
+ *
+ * `explorer.exe <path>` performs the same default-application open with no shell in the middle,
+ * and is already how this file's reveal path talks to Windows.
+ *
+ * File scope rather than a member: [FileSystemUtils] is at detekt's `TooManyFunctions` ceiling.
+ */
+internal fun openCommand(
+    osName: String,
+    path: String,
+): Array<String>? {
+    val os = osName.lowercase()
+    return when {
+        os.contains("mac") -> arrayOf("open", path)
+        os.contains("windows") -> arrayOf("explorer.exe", path)
+        os.contains("linux") -> arrayOf("xdg-open", path)
+        else -> null
+    }
 }
