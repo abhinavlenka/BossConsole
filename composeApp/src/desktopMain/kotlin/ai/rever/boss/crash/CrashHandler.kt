@@ -203,7 +203,9 @@ object CrashHandler {
      * ktor channels, coroutine cancellations, and Supabase session-refresh
      * failures (supabase-kt throws TokenExpiredException into its own internal
      * coroutines when an authenticated request races an expired session — the
-     * auth layer recovers on its own, see CoreAuthService.startSessionRecovery).
+     * auth layer recovers on its own, see CoreAuthService.startSessionRecovery),
+     * and a plugin classloader refusing a late class request after unload (see
+     * [isPluginTeardownRefusal]).
      * Matched by class-name suffix + message so we don't need a compile
      * dependency on ktor/coroutines here.
      */
@@ -218,6 +220,7 @@ object CrashHandler {
                     name.endsWith("CancellationException") ||
                     name == "io.github.jan.supabase.auth.exception.TokenExpiredException" ||
                     isStaleRealtimeRejoin(t) ||
+                    isPluginTeardownRefusal(t) ||
                     (
                         t is java.io.IOException && (
                             msg.contains("Broken pipe", ignoreCase = true) ||
@@ -229,6 +232,37 @@ object CrashHandler {
                     )
             benign
         }
+
+    /**
+     * A plugin classloader refusing a class request after the plugin was unloaded.
+     *
+     * `PluginClassLoader` answers a late request with `ClassNotFoundException` **on purpose** -
+     * delegating to the host would splice two class graphs together - and the JVM turns that
+     * into a `NoClassDefFoundError` at the resolution site, on whatever straggler thread made
+     * the request: a Ktor selector actor, a coroutine dispatcher, an AWT handler. Nothing is
+     * broken at that point; the refusal is the protection working, and the loader has already
+     * logged it at WARN with the straggler's stack.
+     *
+     * What followed was not benign: the refusal reached the uncaught handler during an ordinary
+     * unload - a plugin update, a reload, a sign-out - and was classified as a crash. Recovery
+     * for an already-unloaded plugin is unavailable, so [classifyCrash] resolves it to
+     * [CrashDisposition.FatalHost] and the user gets the crash dialog, whose dismissal exits
+     * BOSS. Filed three times from two different plugins and both platforms:
+     * risa-labs-inc/boss-plugin-terminal-tab#69 (terminaltab, macOS), #71 (fluckbrowser, then
+     * terminaltab - "On sign out get this"), #76 (terminaltab, Windows).
+     *
+     * Matched on the two stable fragments of the loader's own sentence rather than on the whole
+     * message or on `NoClassDefFoundError` in general: the dash in it changed from an em-dash to
+     * a hyphen between 9.4.0 and 9.4.13, and a class genuinely missing from a live plugin's jar
+     * must still be reported. The straggler reference remains the bug; this only stops the
+     * teardown artifact from being shown to the user as a crash.
+     */
+    internal fun isPluginTeardownRefusal(throwable: Throwable): Boolean {
+        val message = throwable.message ?: return false
+        return throwable is ClassNotFoundException &&
+            message.startsWith("Plugin classloader for") &&
+            message.contains("refusing to resolve")
+    }
 
     /**
      * supabase-kt 3.8.0 can resume scheduleRejoin during the socket reconnect delay.
