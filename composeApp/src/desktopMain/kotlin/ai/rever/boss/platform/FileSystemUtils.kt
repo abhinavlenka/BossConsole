@@ -3,6 +3,7 @@ package ai.rever.boss.platform
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.utils.revealInFileManager
+import ai.rever.boss.utils.windowsExplorer
 import java.io.File
 import java.io.IOException
 import java.util.UUID
@@ -295,18 +296,28 @@ object FileSystemUtils {
  * happened to contain a space was quoted whole and worked, which is why this survived.
  *
  * `explorer.exe <path>` performs the same default-application open with no shell in the middle,
- * and is already how this file's reveal path talks to Windows.
+ * and is already how this file's reveal path talks to Windows. [explorer] is Windows' own
+ * `%SystemRoot%\explorer.exe` where that resolves (see [windowsExplorer]), so a same-named binary
+ * earlier in the search path cannot stand in for it.
+ *
+ * **[path] must already be an OS-absolute path.** Explorer's parser is non-standard and honours
+ * switches such as `/select,` and `/root,` in its operand (see `revealInFileManager`), so
+ * `openCommand("Windows 11", "/select,C:\Users")` would run one. Nothing here prevents that; what
+ * does is [FileSystemUtils.openFile] passing `file.absolutePath`, which on Windows always starts
+ * with a drive or `\\`, so a file named `/n` or `-e` can never be the start of the operand.
+ * Keep that true for any new caller.
  *
  * File scope rather than a member: [FileSystemUtils] is at detekt's `TooManyFunctions` ceiling.
  */
 internal fun openCommand(
     osName: String,
     path: String,
+    explorer: String = windowsExplorer(),
 ): Array<String>? {
     val os = osName.lowercase()
     return when {
         os.contains("mac") -> arrayOf("open", path)
-        os.contains("windows") -> arrayOf("explorer.exe", path)
+        os.contains("windows") -> arrayOf(explorer, path)
         os.contains("linux") -> arrayOf("xdg-open", path)
         else -> null
     }

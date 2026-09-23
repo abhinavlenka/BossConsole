@@ -14,13 +14,18 @@ import kotlin.test.assertNull
  * did not open, and the text after `&` was run as a command. The path reaches this code from
  * the downloads panel's Open and from a file link clicked in terminal output, so its spelling
  * is not always the user's own.
+ *
+ * The Windows cases pass [EXPLORER] explicitly, so they read the same on a Windows runner (where
+ * the default resolves from `%SystemRoot%`) as anywhere else.
  */
 class OpenCommandTest {
+    private fun windows(path: String) = openCommand("Windows 11", path, explorer = EXPLORER)
+
     @Test
     fun `windows opens through explorer, with no shell in the middle`() {
-        val command = openCommand("Windows 11", """C:\Users\dev\Downloads\report.pdf""")
+        val command = windows("""C:\Users\dev\Downloads\report.pdf""")
 
-        assertContentEquals(arrayOf("explorer.exe", """C:\Users\dev\Downloads\report.pdf"""), command)
+        assertContentEquals(arrayOf(EXPLORER, """C:\Users\dev\Downloads\report.pdf"""), command)
     }
 
     @Test
@@ -28,10 +33,36 @@ class OpenCommandTest {
         // No space anywhere, so the JDK would have passed this to cmd unquoted.
         val path = """C:\Users\dev\Downloads\R&D^notes%TEMP%.pdf"""
 
-        val command = openCommand("Windows 11", path)!!
+        val command = windows(path)!!
 
-        assertContentEquals(arrayOf("explorer.exe", path), command)
+        assertContentEquals(arrayOf(EXPLORER, path), command)
         assertFalse(command.any { it == "cmd" || it == "start" }, command.joinToString(" "))
+    }
+
+    // The case that already worked under cmd, so a regression here would be the quiet one. The
+    // double space also keeps openFile clear of revealInFileManager's documented double-space
+    // defect, which comes from its single-string exec.
+    @Test
+    fun `a windows path with spaces, doubled ones included, is still one argument`() {
+        val path = """C:\Users\dev\My  Docs\R&D report.pdf"""
+
+        assertContentEquals(arrayOf(EXPLORER, path), windows(path))
+    }
+
+    @Test
+    fun `a UNC path is passed through whole`() {
+        val path = """\\server\share\R&D.pdf"""
+
+        assertContentEquals(arrayOf(EXPLORER, path), windows(path))
+    }
+
+    // Safe because openFile passes an absolute path, so the switch-like name is never the start of
+    // the operand - see openCommand's precondition.
+    @Test
+    fun `a file named like an explorer switch stays part of its path`() {
+        val path = """C:\Users\dev\Downloads\-n,select.pdf"""
+
+        assertContentEquals(arrayOf(EXPLORER, path), windows(path))
     }
 
     @Test
@@ -46,5 +77,9 @@ class OpenCommandTest {
     @Test
     fun `an OS with no launcher gets no command rather than a guess`() {
         assertNull(openCommand("SunOS", "/export/home/dev/report.pdf"))
+    }
+
+    private companion object {
+        const val EXPLORER = """C:\Windows\explorer.exe"""
     }
 }
