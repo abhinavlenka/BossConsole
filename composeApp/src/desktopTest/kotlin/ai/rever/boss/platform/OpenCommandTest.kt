@@ -1,5 +1,7 @@
 package ai.rever.boss.platform
 
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertFalse
@@ -63,6 +65,28 @@ class OpenCommandTest {
         val path = """C:\Users\dev\Downloads\-n,select.pdf"""
 
         assertContentEquals(arrayOf(EXPLORER, path), windows(path))
+    }
+
+    // Every case above passes EXPLORER explicitly, so none of them would notice the production
+    // default going back to a bare "explorer.exe". This one pins the default openFile really uses.
+    // It needs a real SystemRoot, so it runs on the Windows CI runner and is skipped elsewhere.
+    @Test
+    fun `by default windows launches the explorer under SystemRoot`() {
+        assumeTrue(
+            System
+                .getProperty("os.name")
+                .orEmpty()
+                .lowercase()
+                .contains("windows"),
+            "needs Windows",
+        )
+        val systemRoot = System.getenv("SystemRoot")
+        assumeTrue(systemRoot != null, "SystemRoot is unset")
+        val explorer = """${checkNotNull(systemRoot).trimEnd('\\')}\explorer.exe"""
+        assumeTrue(File(explorer).isFile, "no explorer.exe under SystemRoot on this machine")
+        val path = """C:\Users\dev\Downloads\report.pdf"""
+
+        assertContentEquals(arrayOf(explorer, path), openCommand("Windows 11", path))
     }
 
     @Test
