@@ -976,7 +976,7 @@ internal class McpToolRegistryCore(
         if (
             policy == McpPolicyAction.ALLOW &&
             DefaultMcpRiskEvaluator.isShellTool(toolName) &&
-            DefaultMcpRiskEvaluator().evaluateRisk(toolName, args).level == McpRiskLevel.CRITICAL
+            DefaultMcpRiskEvaluator().evaluateRisk(toolName, args).level >= McpRiskLevel.CRITICAL
         ) {
             McpPolicyAction.ASK
         } else {
