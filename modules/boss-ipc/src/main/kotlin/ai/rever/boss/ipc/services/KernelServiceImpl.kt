@@ -154,11 +154,30 @@ class KernelServiceImpl(
      * Call before spawning a replacement: a respawn re-registers the same id, and evicting
      * after that would drop the live child's entries instead of the dead one's.
      *
-     * @return true if the id was registered and its entries were dropped.
+     * [registeredBefore] makes the eviction compare-and-remove (#1612): only an entry registered
+     * before that instant is dropped. The failure path passes the moment the death was observed,
+     * so a replacement that registered after it - for instance while a duplicate report of the
+     * same death was still being handled - keeps its registration. Registration time is the
+     * identity that works here: the ipcAddress is derived from the process type and id alone, so
+     * the dead child and its replacement share it. The heartbeat entry is guarded the same way.
+     *
+     * @return true if the id was registered before [registeredBefore] and its entries were dropped.
      */
-    fun deregisterProcess(processId: String): Boolean {
-        val evicted = evictProcess(processId)
+    fun deregisterProcess(
+        processId: String,
+        registeredBefore: Long = Long.MAX_VALUE,
+    ): Boolean {
+        var evicted = false
+        registeredProcesses.computeIfPresent(processId) { _, info ->
+            if (info.registeredAt < registeredBefore) {
+                evicted = true
+                null
+            } else {
+                info
+            }
+        }
         if (evicted) {
+            lastHeartbeats.computeIfPresent(processId) { _, last -> if (last < registeredBefore) null else last }
             logger.info("Deregistered process after failure: id={}", processId)
         }
         return evicted

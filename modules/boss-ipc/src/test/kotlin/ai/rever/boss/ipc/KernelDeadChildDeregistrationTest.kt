@@ -81,6 +81,53 @@ class KernelDeadChildDeregistrationTest {
             }
         }
 
+    // #1612: a dead child's death can be reported twice (the global monitor re-attached to the
+    // still-registered dead handle). The first report evicts and respawns; if the replacement
+    // registers before the second report is handled, that second eviction must leave it alone.
+    @Test
+    fun `a duplicate failure report cannot evict a replacement that registered in between`() =
+        runBlocking {
+            val kernel = KernelServiceImpl()
+            IpcTestServer(kernel).use { host ->
+                val alpha =
+                    KernelServiceGrpcKt.KernelServiceCoroutineStub(
+                        host.channelFor("alpha", ADDRESS_ALPHA),
+                    )
+                assertTrue(alpha.registerProcess(registration("alpha", ADDRESS_ALPHA)).success)
+                Thread.sleep(5)
+                val firstReport = System.currentTimeMillis()
+                val secondReport = firstReport // the duplicate observes the same dead handle
+                Thread.sleep(5)
+
+                // First report: evict the dead child, then the respawn re-registers the id.
+                assertTrue(kernel.deregisterProcess("alpha", registeredBefore = firstReport))
+                Thread.sleep(5)
+                assertTrue(alpha.registerProcess(registration("alpha", ADDRESS_ALPHA)).success)
+
+                // Second report of the same death, handled after the replacement registered.
+                assertFalse(kernel.deregisterProcess("alpha", registeredBefore = secondReport))
+                assertEquals(
+                    ProcessState.PROCESS_STATE_RUNNING,
+                    alpha.getProcessStatus(status("alpha")).state,
+                    "the live replacement must keep its registration",
+                )
+                assertTrue(kernel.getLastHeartbeat("alpha") != null, "and its heartbeat")
+            }
+        }
+
+    @Test
+    fun `an entry registered before the death was observed is still evicted`() =
+        runBlocking {
+            val kernel = KernelServiceImpl()
+            IpcTestServer(kernel).use { host ->
+                register(host, "alpha", ADDRESS_ALPHA)
+                Thread.sleep(5)
+
+                assertTrue(kernel.deregisterProcess("alpha", registeredBefore = System.currentTimeMillis()))
+                assertNull(kernel.getLastHeartbeat("alpha"))
+            }
+        }
+
     @Test
     fun `new registrants are handed live addresses only`() =
         runBlocking {
