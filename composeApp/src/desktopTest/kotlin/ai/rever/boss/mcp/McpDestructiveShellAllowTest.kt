@@ -216,4 +216,17 @@ class McpDestructiveShellAllowTest {
             assertTrue(approvalBus.pendingList.value.isEmpty(), "a saved deny must not ask again")
             assertEquals(0, handlerRuns)
         }
+
+    // Review on #1650: the ledger row is built inside invoke's finally from the sanitized
+    // arguments; a payload nested deep enough to overflow the parser must not cost the audit trail.
+    @Test
+    fun `a deeply nested payload still leaves its ledger record`() =
+        runBlocking {
+            val core = core("docker_rm")
+            val deep = "{\"a\":" + "[".repeat(8_000) + "]".repeat(8_000) + "}"
+
+            core.invoke("docker_rm", deep)
+
+            assertEquals(1L, ledger.totalCalls.value, "the call must be recorded")
+        }
 }

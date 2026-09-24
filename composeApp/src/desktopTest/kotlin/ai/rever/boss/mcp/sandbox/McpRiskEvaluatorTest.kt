@@ -348,7 +348,7 @@ class McpRiskEvaluatorTest {
 
         // Past the node cap the payload cannot be vouched for, so it is asked about.
         assertEquals(McpRiskLevel.CRITICAL, assessment.level)
-        assertTrue(assessment.reason.contains("too large to inspect"), assessment.reason)
+        assertTrue(assessment.reason.contains("nested too deeply to inspect"), assessment.reason)
     }
 
     @Test
