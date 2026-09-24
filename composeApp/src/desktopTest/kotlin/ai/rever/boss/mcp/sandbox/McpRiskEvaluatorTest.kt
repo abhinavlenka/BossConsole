@@ -255,6 +255,10 @@ class McpRiskEvaluatorTest {
             "git push origin main --force",
             "git push --force-with-lease origin dev",
             "git push -uf origin dev",
+            "ls\nrm -r /tmp/x",
+            "rm notes.txt\nrm -r build",
+            "rm build -r",
+            "rm -f build -R",
         )) {
             val level = evaluator.evaluateRisk("run_command", commandArgs(command)).level
             assertEquals(McpRiskLevel.CRITICAL, level, command)
