@@ -807,7 +807,7 @@ internal class McpToolRegistryCore(
         var result: McpToolResult? = null
         var executionStarted = false
         try {
-            val authorization = authorizeInvocation(tool, args, policy, revocation)
+            val authorization = authorizeInvocation(tool, args, policy, revocation, escalated = policy != savedPolicy)
             disposition = authorization.first
             val denial = authorization.second
             result =
@@ -1032,11 +1032,18 @@ internal class McpToolRegistryCore(
             policy
         }
 
+    /**
+     * [escalated] is true when [askBeforeDestructiveShell] turned a saved ALLOW into this ASK. A
+     * rule saved from such a prompt would change nothing - the gate overrides it on the next
+     * destructive call - so an approval here always counts as once, whatever scope came back
+     * (#1624). The dialog offers only that scope; this holds the line if a caller asks for more.
+     */
     private suspend fun authorizeInvocation(
         tool: RegisteredMcpTool,
         args: McpToolArgs,
         policy: McpPolicyAction,
         revocation: Long,
+        escalated: Boolean = false,
     ): Pair<McpApprovalDisposition, String?> =
         when (policy) {
             McpPolicyAction.DENY -> {
@@ -1064,10 +1071,13 @@ internal class McpToolRegistryCore(
                             declaredReadOnly = tool.definition.readOnly,
                             toolDescription = tool.definition.description,
                             policy = policy,
+                            escalated = escalated,
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        approvedAuthorization(tool, decision, revocation)
+                        // Escalated: whatever scope came back, this counts as once (#1624).
+                        val effective = if (escalated) McpApprovalDecision.Approved() else decision
+                        approvedAuthorization(tool, effective, revocation)
                     }
 
                     is McpApprovalDecision.Denied -> {

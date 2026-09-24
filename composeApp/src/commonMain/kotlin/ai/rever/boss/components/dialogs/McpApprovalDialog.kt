@@ -102,6 +102,15 @@ internal fun McpApprovalScope.approveFlags(): McpApproveFlags =
  */
 internal fun McpApprovalScope.persistsDeny(): Boolean = this == McpApprovalScope.ALWAYS_TOOL
 
+/**
+ * The scopes [request]'s prompt offers. An escalated request - a saved ALLOW overridden because
+ * the call rates CRITICAL (#1577) - offers only [McpApprovalScope.ONCE]: any rule saved here
+ * would be overridden again on the next destructive call, so offering "Always" would let the
+ * operator believe they made a lasting change that has no effect (#1624).
+ */
+internal fun scopesFor(request: McpApprovalRequest): List<McpApprovalScope> =
+    if (request.escalated) listOf(McpApprovalScope.ONCE) else McpApprovalScope.entries
+
 internal fun McpApprovalScope.allowLabel(): String =
     when (this) {
         McpApprovalScope.ONCE -> "Allow once"
@@ -244,6 +253,7 @@ fun McpApprovalDialog(
                         color = colors.textSecondary,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
+                    val scopes = scopesFor(request)
                     Column(modifier = Modifier.selectableGroup()) {
                         ScopeOption(
                             title = "Just this call",
@@ -251,27 +261,43 @@ fun McpApprovalDialog(
                             selected = scope == McpApprovalScope.ONCE,
                             onSelect = { scope = McpApprovalScope.ONCE },
                         )
-                        ScopeOption(
-                            title = "This session",
-                            description = "Allow this tool until BOSS quits. Deny still applies once.",
-                            selected = scope == McpApprovalScope.SESSION,
-                            onSelect = { scope = McpApprovalScope.SESSION },
-                        )
-                        ScopeOption(
-                            title = "Always, for this tool",
-                            description =
-                                "Saved by tool name for all agents and arguments, across restarts - " +
-                                    "including a replacement plugin that ships a tool with this name.",
-                            selected = scope == McpApprovalScope.ALWAYS_TOOL,
-                            onSelect = { scope = McpApprovalScope.ALWAYS_TOOL },
-                        )
-                        ScopeOption(
-                            title = "Always, for every tool from this plugin",
-                            description =
-                                "Trusts everything \"${request.providerId}\" provides, now and in later versions.",
-                            selected = scope == McpApprovalScope.ALWAYS_PLUGIN,
-                            titleColor = colors.warn,
-                            onSelect = { scope = McpApprovalScope.ALWAYS_PLUGIN },
+                        if (McpApprovalScope.SESSION in scopes) {
+                            ScopeOption(
+                                title = "This session",
+                                description = "Allow this tool until BOSS quits. Deny still applies once.",
+                                selected = scope == McpApprovalScope.SESSION,
+                                onSelect = { scope = McpApprovalScope.SESSION },
+                            )
+                        }
+                        if (McpApprovalScope.ALWAYS_TOOL in scopes) {
+                            ScopeOption(
+                                title = "Always, for this tool",
+                                description =
+                                    "Saved by tool name for all agents and arguments, across restarts - " +
+                                        "including a replacement plugin that ships a tool with this name.",
+                                selected = scope == McpApprovalScope.ALWAYS_TOOL,
+                                onSelect = { scope = McpApprovalScope.ALWAYS_TOOL },
+                            )
+                        }
+                        if (McpApprovalScope.ALWAYS_PLUGIN in scopes) {
+                            ScopeOption(
+                                title = "Always, for every tool from this plugin",
+                                description =
+                                    "Trusts everything \"${request.providerId}\" provides, now and in later versions.",
+                                selected = scope == McpApprovalScope.ALWAYS_PLUGIN,
+                                titleColor = colors.warn,
+                                onSelect = { scope = McpApprovalScope.ALWAYS_PLUGIN },
+                            )
+                        }
+                    }
+                    if (request.escalated) {
+                        Text(
+                            text =
+                                "This call is asked every time, even though this tool is allowed: it looks " +
+                                    "destructive, and no saved rule can approve that in advance.",
+                            fontSize = 11.sp,
+                            color = colors.warn,
+                            modifier = Modifier.padding(top = 6.dp),
                         )
                     }
                     Text(

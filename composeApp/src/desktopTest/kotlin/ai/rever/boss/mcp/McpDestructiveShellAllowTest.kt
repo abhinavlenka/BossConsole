@@ -158,4 +158,42 @@ class McpDestructiveShellAllowTest {
             assertFalse(pending.await().isError)
             assertEquals(1, handlerRuns)
         }
+
+    // #1624: the prompt marks itself escalated so the dialog can offer only a one-off answer, and
+    // a broader answer that still arrives counts as once - no rule is saved that the gate would
+    // just override on the next destructive call.
+    @Test
+    fun `an escalated prompt is marked, and an Always answer to it runs once and saves nothing`() =
+        runBlocking {
+            val core = core("run_command")
+            val pending = async { core.invoke("run_command", command("rm -rf /srv/app")) }
+
+            val request = awaitPrompt()
+            assertTrue(request.escalated, "a saved ALLOW overridden for a CRITICAL call must say so")
+            approvalBus.approve(request.id, trustProvider = true)
+
+            assertFalse(pending.await().isError)
+            assertEquals(
+                McpApprovalDisposition.APPROVED_ONCE,
+                ledger.recentOperations.value
+                    .first()
+                    .approvalDisposition,
+            )
+            assertTrue(
+                policyEngine.policyFor("some_other_tool", "p1", false) != McpPolicyAction.ALLOW,
+                "an escalated prompt must not be able to trust the whole plugin",
+            )
+        }
+
+    @Test
+    fun `a prompt for a tool that was never allowed is not marked escalated`() =
+        runBlocking {
+            val core = core("run_command", allowEachTool = false)
+            val pending = async { core.invoke("run_command", command("rm -rf /srv/app")) }
+
+            val request = awaitPrompt()
+            assertFalse(request.escalated, "only a saved ALLOW that was overridden is an escalation")
+            approvalBus.deny(request.id)
+            assertTrue(pending.await().isError)
+        }
 }

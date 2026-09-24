@@ -1,6 +1,12 @@
 package ai.rever.boss.mcp.sandbox
 
 import ai.rever.boss.plugin.api.McpToolArgs
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Evaluates the risk level of an MCP tool call based on tool name and parsed arguments.
@@ -82,12 +88,9 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
     private fun evaluateShellCommand(
         toolName: String,
         args: McpToolArgs,
-    ): McpRiskAssessment {
-        val command = args.string("command") ?: args.string("cmd") ?: ""
-        val lowerCmd = command.lowercase().trim()
-
-        return when {
-            isDestructiveShellCommand(lowerCmd) -> {
+    ): McpRiskAssessment =
+        when {
+            shellPayloads(args).any { isDestructiveShellCommand(it.lowercase().trim()) } -> {
                 McpRiskAssessment(
                     level = McpRiskLevel.CRITICAL,
                     reason = "Shell execution tool '$toolName' contains potentially destructive command pattern",
@@ -101,15 +104,44 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
                 )
             }
         }
-    }
 
     // Wording heuristic only: both HIGH and CRITICAL must require approval. This is not a shell parser.
     // CRITICAL is also what makes a saved "Always Allow" on a shell tool ask again (#1577), so the
     // matcher reads each command of a chain for the flag shapes a destructive call really takes,
     // not only the one spelling of each: `rm -fr`, `rm -r -f`, `/bin/rm -R`, `git push origin
     // main --force`, `Remove-Item -Recurse`. [cmd] arrives lowercased and trimmed.
-    private fun isDestructiveShellCommand(cmd: String): Boolean {
-        if (cmd.isEmpty()) return false
+
+    /**
+     * Every text a shell tool's call could hand a shell: `command` and `cmd`, plus every string
+     * anywhere in the raw arguments (#1624). `send_input` carries its keystrokes in `text`, and a
+     * plugin-defined shell tool may use any key, so reading only `command`/`cmd` let a destructive
+     * payload under another name rate HIGH and run under a saved "Always Allow". Rating on the most
+     * dangerous string can only err toward asking. Unparseable raw arguments fall back to the two
+     * named keys.
+     */
+    private fun shellPayloads(args: McpToolArgs): List<String> {
+        val raw =
+            try {
+                stringsIn(Json.parseToJsonElement(args.raw))
+            } catch (_: SerializationException) {
+                emptyList()
+            }
+        return listOfNotNull(args.string("command"), args.string("cmd")) + raw
+    }
+
+    private fun stringsIn(element: JsonElement): List<String> =
+        when (element) {
+            is JsonPrimitive -> if (element.isString) listOf(element.content) else emptyList()
+            is JsonArray -> element.flatMap(::stringsIn)
+            is JsonObject -> element.values.flatMap(::stringsIn)
+        }
+
+    private fun isDestructiveShellCommand(raw: String): Boolean {
+        if (raw.isEmpty()) return false
+        // A line continuation (`\`, PowerShell's backtick or cmd's `^` before a newline) joins two
+        // lines into one command for the shell; join them here too, or `rm \` + newline + `-rf /srv`
+        // splits into an `rm` with no flags and a line with no `rm` (#1624).
+        val cmd = raw.replace(LINE_CONTINUATION, " ")
         val normalized = cmd.replace(WHITESPACE, " ")
         // Split the raw command, not [normalized]: collapsing whitespace first turns a newline
         // into a space, and the next command would hide inside the previous one's tokens.
@@ -164,6 +196,9 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
             listOf("rm -rf", "del /s", "format ", "mkfs", "git push --force", "git push -f", "dd if=", "chmod -r 777")
 
         private val WHITESPACE = Regex("""\s+""")
+
+        /** A shell line continuation: `\` (POSIX), a backtick (PowerShell) or `^` (cmd) before a newline. */
+        private val LINE_CONTINUATION = Regex("""[\\`^]\r?\n""")
 
         /** Where one command of a chain ends: `;`, `&`/`&&`, `|`/`||`, a newline, `$(` or a backtick. */
         private val COMMAND_SEPARATOR = Regex("""[;&|\n`]|\$\(""")

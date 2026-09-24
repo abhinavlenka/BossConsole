@@ -1,5 +1,6 @@
 package ai.rever.boss.components.dialogs
 
+import ai.rever.boss.mcp.McpApprovalRequest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -29,5 +30,16 @@ class McpApprovalScopeTest {
         // A scope that cannot deny durably must not let the Deny button imply it does.
         assertEquals("Deny once", McpApprovalScope.SESSION.denyLabel())
         assertEquals("Deny once", McpApprovalScope.ALWAYS_PLUGIN.denyLabel())
+    }
+
+    // #1624: a saved ALLOW overridden for a CRITICAL call cannot be pre-approved by any rule, so
+    // its prompt offers only a one-off answer instead of an "Always" that would change nothing.
+    @Test
+    fun `an escalated prompt offers only a one-off answer`() {
+        val request =
+            McpApprovalRequest(toolName = "run_command", providerId = "p", arguments = emptyMap(), timeoutMs = 1_000)
+
+        assertEquals(McpApprovalScope.entries, scopesFor(request))
+        assertEquals(listOf(McpApprovalScope.ONCE), scopesFor(request.copy(escalated = true)))
     }
 }

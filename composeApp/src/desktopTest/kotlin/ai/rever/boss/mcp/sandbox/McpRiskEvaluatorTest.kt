@@ -307,15 +307,48 @@ class McpRiskEvaluatorTest {
     }
 
     @Test
-    fun `the command argument wins over the cmd alias`() {
-        // Precedence, not a merge: `command` is read first and the evaluator never falls
-        // through to `cmd` when both are present.
+    fun `a destructive payload under any argument rates CRITICAL, not only under command`() {
+        // A merge, not precedence (#1624): a tool may read `cmd`, or `text`, or anything else, so a
+        // harmless `command` must not hide a destructive value beside it. Rating on the most
+        // dangerous string can only err toward asking.
         val both =
             McpToolArgs(
                 mapOf("command" to "ls -la", "cmd" to "rm -rf /tmp/cache"),
                 "{\"command\":\"ls -la\",\"cmd\":\"rm -rf /tmp/cache\"}",
             )
-        assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("run_command", both).level)
+        assertEquals(McpRiskLevel.CRITICAL, evaluator.evaluateRisk("run_command", both).level)
+    }
+
+    // send_input carries its keystrokes in `text` (TerminalServiceMain's schema), and plugin-defined
+    // shell tools may use any key - before #1624 none of these could ever rate CRITICAL.
+    @Test
+    fun `shell payloads under other keys and inside nested values are read`() {
+        fun args(json: String) = McpToolArgs(emptyMap(), json)
+        for (json in listOf(
+            """{"sessionId":"s1","text":"rm -rf /srv/app"}""",
+            """{"input":"git push origin main --force"}""",
+            """{"steps":["ls","rm -fr build"]}""",
+            """{"script":{"body":"mkfs.ext4 /dev/sdb"}}""",
+        )) {
+            assertEquals(McpRiskLevel.CRITICAL, evaluator.evaluateRisk("send_input", args(json)).level, json)
+        }
+        assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("send_input", args("""{"text":"ls -la"}""")).level)
+        // Unparseable raw arguments fall back to the named keys rather than failing.
+        assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("send_input", args("not json")).level)
+    }
+
+    @Test
+    fun `a line continuation cannot split a destructive command in two`() {
+        for (command in listOf(
+            "rm \\\n-rf /srv",
+            "rm -r \\\r\n-f /srv",
+            "Remove-Item `\n-Recurse C:\\build",
+            "rd ^\n/s build",
+        )) {
+            val level = evaluator.evaluateRisk("run_command", commandArgs(command)).level
+            assertEquals(McpRiskLevel.CRITICAL, level, command)
+        }
+        assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("run_command", commandArgs("echo \\\nhello")).level)
     }
 
     @Test
