@@ -13,11 +13,35 @@ REM   boss folder <path>                # Opens folder in codebase
 REM   boss terminal                     # Opens terminal
 REM   boss terminal -c <command>        # Opens terminal with command
 
-REM delayed expansion is OFF at the top level: nothing in this script reads
-REM !var!, and EnableDelayedExpansion would let a literal ! in an argument
-REM (e.g. "boss file 'foo!bar.txt'") get eaten by the parser before :urlencode
-REM can hand the value to PowerShell. No function here needs delayed expansion.
+REM delayed expansion is OFF at the top level: EnableDelayedExpansion would let
+REM a literal ! in an argument (e.g. "boss file 'foo!bar.txt'") get eaten by
+REM the parser before :urlencode can hand the value to PowerShell. Only
+REM :check_arg_quotes turns it on, inside its own scope, to read a value that
+REM is already in a variable.
 setlocal DisableDelayedExpansion
+
+REM Refuse a " inside an argument before anything reads one (#1617). Every read
+REM below wraps the argument in quotes - if "%~1"=="" - and cmd substitutes %~1
+REM before it parses the line, so a quote in the value closes that quote early:
+REM x"=="x" calc & rem " turns the first check into if "x"=="x" calc & rem ...
+REM and runs calc. Checking needs the raw text without cmd parsing it, and an
+REM echoed REM line is the one place cmd writes %* out untouched, so capture it
+REM there into a per-call file and read it back through a FOR variable.
+set "BOSS_ARGS_FILE=%TEMP%\boss-args-%RANDOM%%RANDOM%.tmp"
+set "BOSS_RAW_ARGS="
+setlocal
+for %%a in (1) do (
+    set "prompt=$_"
+    echo on
+    for %%b in (1) do rem * #%*#
+    @echo off
+) > "%BOSS_ARGS_FILE%"
+endlocal
+if exist "%BOSS_ARGS_FILE%" (
+    for /f "usebackq delims=" %%L in ("%BOSS_ARGS_FILE%") do set "BOSS_RAW_ARGS=%%L"
+    del "%BOSS_ARGS_FILE%" >nul 2>&1
+)
+call :check_arg_quotes || exit /b 1
 
 REM Check if no arguments provided
 if "%~1"=="" (
@@ -197,6 +221,58 @@ echo   boss plugin bookmarks
 echo   boss plugin secret-manager
 echo.
 goto :eof
+
+REM Refuse a quote inside an argument (#1617). Reads BOSS_RAW_ARGS, the raw
+REM command line captured at the top.
+REM Usage: call :check_arg_quotes || exit /b 1
+REM An argument may be quoted as a whole and hold no quote inside. That is all a
+REM path or a URL needs, and it leaves no %~N that can carry a quote into the
+REM quoted reads above. So a " may only open at the start or after a space, and
+REM only close at the end or before a space. Delayed expansion is on here only:
+REM the value is already in a variable, and !var! reads are never re-parsed.
+:check_arg_quotes
+setlocal EnableDelayedExpansion
+if not defined BOSS_RAW_ARGS (
+    echo Error: could not read the command-line arguments
+    endlocal & exit /b 1
+)
+set "rest=!BOSS_RAW_ARGS:*#=!"
+:check_arg_quotes_trim
+if defined rest if "!rest:~-1!"==" " set "rest=!rest:~0,-1!" & goto :check_arg_quotes_trim
+if defined rest if "!rest:~-1!"=="#" set "rest=!rest:~0,-1!"
+REM Length first, so the walk below stops at the last character.
+set "s=!rest!#"
+set "len=0"
+for %%P in (4096 2048 1024 512 256 128 64 32 16 8 4 2 1) do if not "!s:~%%P,1!"=="" (
+    set /a "len+=%%P"
+    set "s=!s:~%%P!"
+)
+set /a "last=len-1"
+set q=^"
+set "open="
+set "prev= "
+set "bad="
+for /l %%i in (0,1,!last!) do if not defined bad (
+    set "c=!rest:~%%i,1!"
+    if "!c!"=="!q!" (
+        if defined open (
+            set /a "n=%%i+1"
+            for %%n in (!n!) do set "next=!rest:~%%n,1!"
+            if defined next if not "!next!"==" " set "bad=1"
+            set "open="
+        ) else (
+            if not "!prev!"==" " set "bad=1"
+            set "open=1"
+        )
+    )
+    set "prev=!c!"
+)
+if defined bad (
+    echo Error: an argument has a double quote inside it.
+    echo Quote a whole argument, e.g. boss file "C:\My Files\a.txt". In a URL, write a quote as %%22.
+    endlocal & exit /b 1
+)
+endlocal & exit /b 0
 
 REM URL encode subroutine
 REM Usage: call :urlencode "string to encode" OUTPUT_VAR
