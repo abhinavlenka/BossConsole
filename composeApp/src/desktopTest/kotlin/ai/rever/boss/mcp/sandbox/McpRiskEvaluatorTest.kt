@@ -337,6 +337,53 @@ class McpRiskEvaluatorTest {
         assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("send_input", args("not json")).level)
     }
 
+    // Review on #1650: the scan walks agent-controlled JSON, so it must survive a hostile shape -
+    // a StackOverflowError here would escape the registry's invoke before its ledger record.
+    @Test
+    fun `a 50k-deep payload is rated without overflowing the stack`() {
+        val depth = 50_000
+        val deep = "[".repeat(depth) + "\"ls\"" + "]".repeat(depth)
+
+        val assessment = evaluator.evaluateRisk("send_input", McpToolArgs(emptyMap(), deep))
+
+        // Past the node cap the payload cannot be vouched for, so it is asked about.
+        assertEquals(McpRiskLevel.CRITICAL, assessment.level)
+        assertTrue(assessment.reason.contains("too large to inspect"), assessment.reason)
+    }
+
+    @Test
+    fun `deeply nested objects are rated without overflowing the stack`() {
+        val depth = 50_000
+        val deep = "{\"a\":".repeat(depth) + "\"ls\"" + "}".repeat(depth)
+
+        assertEquals(McpRiskLevel.CRITICAL, evaluator.evaluateRisk("send_input", McpToolArgs(emptyMap(), deep)).level)
+    }
+
+    // The depth check counts structure, not text: brackets inside a string are keystrokes.
+    @Test
+    fun `brackets inside a string are not nesting`() {
+        val typed = "[".repeat(500) + " \\\" ] still text"
+        val args = McpToolArgs(emptyMap(), """{"text":"$typed"}""")
+
+        assertEquals(McpRiskLevel.HIGH, evaluator.evaluateRisk("send_input", args).level)
+    }
+
+    @Test
+    fun `a payload wider than the node cap is asked about, not rated on what was seen`() {
+        val wide = (1..20_000).joinToString(",", prefix = "[", postfix = "]") { "\"ls\"" }
+
+        assertEquals(McpRiskLevel.CRITICAL, evaluator.evaluateRisk("send_input", McpToolArgs(emptyMap(), wide)).level)
+    }
+
+    // The documented fallback, pinned for real: when the raw text does not parse, the named keys
+    // are still read.
+    @Test
+    fun `unparseable raw arguments still rate the command key`() {
+        val args = McpToolArgs(mapOf("command" to "rm -rf /"), "not json")
+
+        assertEquals(McpRiskLevel.CRITICAL, evaluator.evaluateRisk("run_command", args).level)
+    }
+
     @Test
     fun `a line continuation cannot split a destructive command in two`() {
         for (command in listOf(

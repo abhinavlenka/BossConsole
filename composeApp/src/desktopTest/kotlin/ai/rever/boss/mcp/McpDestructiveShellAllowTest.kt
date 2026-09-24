@@ -196,4 +196,24 @@ class McpDestructiveShellAllowTest {
             approvalBus.deny(request.id)
             assertTrue(pending.await().isError)
         }
+
+    // Review on #1650: the deny half of "Always" is the durable answer that does hold on an
+    // escalated prompt - the gate only ever rewrites ALLOW - so it must still be saved.
+    @Test
+    fun `an Always deny on an escalated prompt is saved and holds for later calls`() =
+        runBlocking {
+            val core = core("run_command")
+            val pending = async { core.invoke("run_command", command("rm -rf /srv/app")) }
+
+            val request = awaitPrompt()
+            assertTrue(request.escalated)
+            approvalBus.deny(request.id, persistPolicy = true)
+            assertTrue(pending.await().isError)
+
+            // A later call - even a routine one - is refused by the saved rule, with no prompt.
+            val later = core.invoke("run_command", command("git status"))
+            assertTrue(later.isError, later.text)
+            assertTrue(approvalBus.pendingList.value.isEmpty(), "a saved deny must not ask again")
+            assertEquals(0, handlerRuns)
+        }
 }

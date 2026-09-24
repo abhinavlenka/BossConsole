@@ -103,13 +103,41 @@ internal fun McpApprovalScope.approveFlags(): McpApproveFlags =
 internal fun McpApprovalScope.persistsDeny(): Boolean = this == McpApprovalScope.ALWAYS_TOOL
 
 /**
- * The scopes [request]'s prompt offers. An escalated request - a saved ALLOW overridden because
- * the call rates CRITICAL (#1577) - offers only [McpApprovalScope.ONCE]: any rule saved here
- * would be overridden again on the next destructive call, so offering "Always" would let the
- * operator believe they made a lasting change that has no effect (#1624).
+ * What an approval prompt offers, and what its allow button does, for escalated requests - a
+ * saved ALLOW overridden because the call rates CRITICAL (#1577, #1624). No saved *allow* can
+ * pre-approve such a call - the gate overrides it on the next destructive attempt - but a saved
+ * *deny* is never overridden, so it is exactly the durable answer an operator facing repeated
+ * destructive attempts needs. An object so the rules sit together, apart from the composable.
  */
-internal fun scopesFor(request: McpApprovalRequest): List<McpApprovalScope> =
-    if (request.escalated) listOf(McpApprovalScope.ONCE) else McpApprovalScope.entries
+internal object McpPromptChoices {
+    /** The scopes offered: all of them, or once plus "Always" for its deny half when escalated. */
+    fun scopesFor(request: McpApprovalRequest): List<McpApprovalScope> =
+        if (request.escalated) listOf(McpApprovalScope.ONCE, McpApprovalScope.ALWAYS_TOOL) else McpApprovalScope.entries
+
+    /** What the allow button sends: always once on an escalated request, whatever is selected. */
+    fun allowFlagsFor(
+        request: McpApprovalRequest,
+        scope: McpApprovalScope,
+    ): McpApproveFlags = if (request.escalated) McpApprovalScope.ONCE.approveFlags() else scope.approveFlags()
+
+    /** The allow button's label, matching [allowFlagsFor]. */
+    fun allowLabelFor(
+        request: McpApprovalRequest,
+        scope: McpApprovalScope,
+    ): String = if (request.escalated) McpApprovalScope.ONCE.allowLabel() else scope.allowLabel()
+
+    /** Title and description of the "Always, for this tool" option, which only denies when escalated. */
+    fun alwaysToolText(request: McpApprovalRequest): Pair<String, String> =
+        if (request.escalated) {
+            "Always deny this tool" to
+                "Saves a deny by tool name, across restarts. Allowing still runs just this call: a saved " +
+                "allow cannot pre-approve a destructive one."
+        } else {
+            "Always, for this tool" to
+                "Saved by tool name for all agents and arguments, across restarts - including a replacement " +
+                "plugin that ships a tool with this name."
+        }
+}
 
 internal fun McpApprovalScope.allowLabel(): String =
     when (this) {
@@ -253,14 +281,16 @@ fun McpApprovalDialog(
                         color = colors.textSecondary,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
-                    val scopes = scopesFor(request)
+                    val scopes = McpPromptChoices.scopesFor(request)
                     Column(modifier = Modifier.selectableGroup()) {
-                        ScopeOption(
-                            title = "Just this call",
-                            description = "Ask again next time.",
-                            selected = scope == McpApprovalScope.ONCE,
-                            onSelect = { scope = McpApprovalScope.ONCE },
-                        )
+                        if (McpApprovalScope.ONCE in scopes) {
+                            ScopeOption(
+                                title = "Just this call",
+                                description = "Ask again next time.",
+                                selected = scope == McpApprovalScope.ONCE,
+                                onSelect = { scope = McpApprovalScope.ONCE },
+                            )
+                        }
                         if (McpApprovalScope.SESSION in scopes) {
                             ScopeOption(
                                 title = "This session",
@@ -270,11 +300,10 @@ fun McpApprovalDialog(
                             )
                         }
                         if (McpApprovalScope.ALWAYS_TOOL in scopes) {
+                            val (alwaysTitle, alwaysDescription) = McpPromptChoices.alwaysToolText(request)
                             ScopeOption(
-                                title = "Always, for this tool",
-                                description =
-                                    "Saved by tool name for all agents and arguments, across restarts - " +
-                                        "including a replacement plugin that ships a tool with this name.",
+                                title = alwaysTitle,
+                                description = alwaysDescription,
                                 selected = scope == McpApprovalScope.ALWAYS_TOOL,
                                 onSelect = { scope = McpApprovalScope.ALWAYS_TOOL },
                             )
@@ -294,7 +323,7 @@ fun McpApprovalDialog(
                         Text(
                             text =
                                 "This call is asked every time, even though this tool is allowed: it looks " +
-                                    "destructive, and no saved rule can approve that in advance.",
+                                    "destructive, and no saved rule can approve that in advance - only deny it.",
                             fontSize = 11.sp,
                             color = colors.warn,
                             modifier = Modifier.padding(top = 6.dp),
@@ -373,7 +402,7 @@ fun McpApprovalDialog(
 
                     Button(
                         onClick = {
-                            val flags = scope.approveFlags()
+                            val flags = McpPromptChoices.allowFlagsFor(request, scope)
                             onApprove(flags.trustForSession, flags.persistPolicy, flags.trustProvider)
                         },
                         shape = RoundedCornerShape(radii.button),
@@ -386,7 +415,11 @@ fun McpApprovalDialog(
                         contentPadding = DIALOG_BUTTON_PADDING,
                         modifier = Modifier.height(DIALOG_BUTTON_HEIGHT),
                     ) {
-                        Text(scope.allowLabel(), fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            McpPromptChoices.allowLabelFor(request, scope),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
                     }
                 }
             }

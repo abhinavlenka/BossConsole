@@ -88,9 +88,19 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
     private fun evaluateShellCommand(
         toolName: String,
         args: McpToolArgs,
-    ): McpRiskAssessment =
-        when {
-            shellPayloads(args).any { isDestructiveShellCommand(it.lowercase().trim()) } -> {
+    ): McpRiskAssessment {
+        val scan = shellPayloads(args)
+        return when {
+            // Past the node cap the rest of the payload was never inspected, so it cannot be
+            // vouched for: a saved Always Allow must not run it unasked.
+            scan.truncated -> {
+                McpRiskAssessment(
+                    level = McpRiskLevel.CRITICAL,
+                    reason = "Shell execution tool '$toolName' arguments are too large to inspect fully",
+                )
+            }
+
+            scan.payloads.any { isDestructiveShellCommand(it.lowercase().trim()) } -> {
                 McpRiskAssessment(
                     level = McpRiskLevel.CRITICAL,
                     reason = "Shell execution tool '$toolName' contains potentially destructive command pattern",
@@ -104,6 +114,7 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
                 )
             }
         }
+    }
 
     // Wording heuristic only: both HIGH and CRITICAL must require approval. This is not a shell parser.
     // CRITICAL is also what makes a saved "Always Allow" on a shell tool ask again (#1577), so the
@@ -119,22 +130,71 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
      * dangerous string can only err toward asking. Unparseable raw arguments fall back to the two
      * named keys.
      */
-    private fun shellPayloads(args: McpToolArgs): List<String> {
+    private fun shellPayloads(args: McpToolArgs): ShellScan {
+        val named = listOfNotNull(args.string("command"), args.string("cmd"))
+        // Checked before parsing: kotlinx's tree reader recurses once per nested array, so a
+        // deeply nested payload overflows the stack inside parseToJsonElement itself.
+        if (nestingExceeds(args.raw, MAX_ARGUMENT_DEPTH)) return ShellScan(named, truncated = true)
         val raw =
             try {
                 stringsIn(Json.parseToJsonElement(args.raw))
             } catch (_: SerializationException) {
-                emptyList()
+                ShellScan(emptyList(), truncated = false)
             }
-        return listOfNotNull(args.string("command"), args.string("cmd")) + raw
+        return ShellScan(named + raw.payloads, raw.truncated)
     }
 
-    private fun stringsIn(element: JsonElement): List<String> =
-        when (element) {
-            is JsonPrimitive -> if (element.isString) listOf(element.content) else emptyList()
-            is JsonArray -> element.flatMap(::stringsIn)
-            is JsonObject -> element.values.flatMap(::stringsIn)
+    /**
+     * Whether [raw] nests arrays or objects more than [limit] deep, counting brackets outside JSON
+     * strings (escapes included). A linear scan with no recursion, and no parse: it is what makes
+     * a hostile depth safe to reject before the parser sees it.
+     */
+    private fun nestingExceeds(
+        raw: String,
+        limit: Int,
+    ): Boolean {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (c in raw) {
+            when {
+                escaped -> escaped = false
+                inString && c == '\\' -> escaped = true
+                c == '"' -> inString = !inString
+                inString -> Unit
+                c == '[' || c == '{' -> if (++depth > limit) return true
+                c == ']' || c == '}' -> depth--
+            }
         }
+        return false
+    }
+
+    /**
+     * Every string value in [root], walked with an explicit stack rather than recursion: the JSON
+     * is agent-controlled, and a StackOverflowError here would escape the registry's invoke before
+     * its ledger record is written. Depth is already bounded by [nestingExceeds]; this bounds width,
+     * stopping after [MAX_ARGUMENT_NODES] nodes and reporting the scan as truncated.
+     */
+    private fun stringsIn(root: JsonElement): ShellScan {
+        val found = mutableListOf<String>()
+        val pending = ArrayDeque<JsonElement>().apply { add(root) }
+        var visited = 0
+        while (pending.isNotEmpty()) {
+            if (visited++ == MAX_ARGUMENT_NODES) return ShellScan(found, truncated = true)
+            when (val element = pending.removeLast()) {
+                is JsonPrimitive -> if (element.isString) found += element.content
+                is JsonArray -> pending.addAll(element)
+                is JsonObject -> pending.addAll(element.values)
+            }
+        }
+        return ShellScan(found, truncated = false)
+    }
+
+    /** The strings a shell call carries, and whether the scan stopped at the node cap first. */
+    private class ShellScan(
+        val payloads: List<String>,
+        val truncated: Boolean,
+    )
 
     private fun isDestructiveShellCommand(raw: String): Boolean {
         if (raw.isEmpty()) return false
@@ -196,6 +256,16 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
             listOf("rm -rf", "del /s", "format ", "mkfs", "git push --force", "git push -f", "dd if=", "chmod -r 777")
 
         private val WHITESPACE = Regex("""\s+""")
+
+        /**
+         * JSON nodes a shell call's arguments are scanned for before the rest is treated as
+         * uninspectable (and so CRITICAL). Real tool calls carry a handful; this only bounds a
+         * hostile payload.
+         */
+        private const val MAX_ARGUMENT_NODES = 10_000
+
+        /** Nesting depth past which a shell call's arguments are not parsed at all, and so CRITICAL. */
+        private const val MAX_ARGUMENT_DEPTH = 128
 
         /** A shell line continuation: `\` (POSIX), a backtick (PowerShell) or `^` (cmd) before a newline. */
         private val LINE_CONTINUATION = Regex("""[\\`^]\r?\n""")

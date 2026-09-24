@@ -1038,6 +1038,28 @@ internal class McpToolRegistryCore(
      * destructive call - so an approval here always counts as once, whatever scope came back
      * (#1624). The dialog offers only that scope; this holds the line if a caller asks for more.
      */
+
+    /**
+     * An approval of an escalated call counts as once, whatever scope came back (#1624). The dialog
+     * never asks for more there, so a broader request came from another caller of the approval
+     * bus: it is logged, or the ledger's APPROVED_ONCE would carry no explanation.
+     */
+    private fun onceIfEscalated(
+        tool: RegisteredMcpTool,
+        decision: McpApprovalDecision.Approved,
+        escalated: Boolean,
+    ): McpApprovalDecision.Approved {
+        if (!escalated) return decision
+        if (decision.trustForSession || decision.persistPolicy || decision.trustProvider) {
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Escalated MCP approval asked to be remembered; applied once only",
+                mapOf("tool" to tool.definition.name, "provider" to tool.providerId),
+            )
+        }
+        return McpApprovalDecision.Approved()
+    }
+
     private suspend fun authorizeInvocation(
         tool: RegisteredMcpTool,
         args: McpToolArgs,
@@ -1075,9 +1097,7 @@ internal class McpToolRegistryCore(
                         )
                 ) {
                     is McpApprovalDecision.Approved -> {
-                        // Escalated: whatever scope came back, this counts as once (#1624).
-                        val effective = if (escalated) McpApprovalDecision.Approved() else decision
-                        approvedAuthorization(tool, effective, revocation)
+                        approvedAuthorization(tool, onceIfEscalated(tool, decision, escalated), revocation)
                     }
 
                     is McpApprovalDecision.Denied -> {

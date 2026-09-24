@@ -32,14 +32,28 @@ class McpApprovalScopeTest {
         assertEquals("Deny once", McpApprovalScope.ALWAYS_PLUGIN.denyLabel())
     }
 
-    // #1624: a saved ALLOW overridden for a CRITICAL call cannot be pre-approved by any rule, so
-    // its prompt offers only a one-off answer instead of an "Always" that would change nothing.
+    // #1624 and its review: no saved *allow* can pre-approve an escalated (CRITICAL) call, but a
+    // saved *deny* is never overridden - so the prompt keeps "Always" for its deny half only, and
+    // its allow button stays at once whatever is selected.
     @Test
-    fun `an escalated prompt offers only a one-off answer`() {
+    fun `an escalated prompt can save a deny but never an allow`() {
         val request =
             McpApprovalRequest(toolName = "run_command", providerId = "p", arguments = emptyMap(), timeoutMs = 1_000)
+        val escalated = request.copy(escalated = true)
 
-        assertEquals(McpApprovalScope.entries, scopesFor(request))
-        assertEquals(listOf(McpApprovalScope.ONCE), scopesFor(request.copy(escalated = true)))
+        assertEquals(McpApprovalScope.entries, McpPromptChoices.scopesFor(request))
+        assertEquals(listOf(McpApprovalScope.ONCE, McpApprovalScope.ALWAYS_TOOL), McpPromptChoices.scopesFor(escalated))
+
+        for (scope in McpPromptChoices.scopesFor(escalated)) {
+            val flags = McpPromptChoices.allowFlagsFor(escalated, scope)
+            assertEquals(McpApprovalScope.ONCE.approveFlags(), flags, "$scope")
+            assertEquals("Allow once", McpPromptChoices.allowLabelFor(escalated, scope), "$scope")
+        }
+        assertTrue(McpApprovalScope.ALWAYS_TOOL.persistsDeny(), "the deny half must still persist")
+
+        // Unescalated prompts are unchanged.
+        val always = McpApprovalScope.ALWAYS_TOOL
+        assertEquals(always.approveFlags(), McpPromptChoices.allowFlagsFor(request, always))
+        assertEquals("Always allow", McpPromptChoices.allowLabelFor(request, always))
     }
 }
