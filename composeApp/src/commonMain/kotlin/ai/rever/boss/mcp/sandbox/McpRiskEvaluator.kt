@@ -127,23 +127,30 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
     private fun isDestructiveShellCommand(cmd: String): Boolean {
         if (cmd.isEmpty()) return false
         val normalized = cmd.replace(WHITESPACE, " ")
+        // Split the raw command, not [normalized]: collapsing whitespace first turns a newline
+        // into a space, and the next command would hide inside the previous one's tokens.
         return DESTRUCTIVE_WORDING.any { it in normalized } ||
-            normalized.split(COMMAND_SEPARATOR).any { segment ->
+            cmd.split(COMMAND_SEPARATOR).any { segment ->
                 val tokens =
                     segment
-                        .split(' ')
+                        .split(WHITESPACE)
                         .map { token -> token.trim { it in TOKEN_QUOTES } }
                         .filter { it.isNotEmpty() }
                 isRecursiveRm(tokens) || isRecursiveWindowsDelete(tokens) || isForcePush(tokens)
             }
     }
 
-    /** `rm` (by any path, after `sudo` or not) with a recursive flag in any spelling or order. */
+    /**
+     * `rm` (by any path, after `sudo` or not) with a recursive flag in any spelling or order.
+     * GNU rm also takes options after operands (`rm build -r`), so every token up to `--` counts,
+     * and every `rm` in the segment is checked, not only the first.
+     */
     private fun isRecursiveRm(tokens: List<String>): Boolean {
-        val rm = tokens.indexOfFirst { it == "rm" || it.endsWith("/rm") }
-        if (rm < 0) return false
-        return tokens.drop(rm + 1).takeWhile { it.startsWith("-") }.any { flag ->
-            flag.startsWith("--recursive") || (!flag.startsWith("--") && 'r' in flag)
+        val rms = tokens.indices.filter { tokens[it] == "rm" || tokens[it].endsWith("/rm") }
+        return rms.any { rm ->
+            tokens.drop(rm + 1).takeWhile { it != "--" }.any { flag ->
+                flag.startsWith("--recursive") || (flag.startsWith("-") && !flag.startsWith("--") && 'r' in flag)
+            }
         }
     }
 
