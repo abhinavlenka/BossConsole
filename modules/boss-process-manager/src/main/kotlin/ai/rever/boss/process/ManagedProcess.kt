@@ -55,6 +55,10 @@ class ManagedProcess(
      * later one. A dead handle stays registered until its replacement is spawned, so the global
      * monitor can re-attach to it and see the same death again (#1612); only the claimant emits,
      * so one death is one ProcessFailure however many monitors observe it.
+     *
+     * The claim is taken before the emit, so a monitor cancelled between the two leaves the death
+     * claimed but never reported, and the global monitor's CRASHED skip then keeps it that way.
+     * Cancellation only happens on the supervision-stop path, where no respawn is wanted anyway.
      */
     fun claimFailureReport(): Boolean = failureReported.compareAndSet(false, true)
 

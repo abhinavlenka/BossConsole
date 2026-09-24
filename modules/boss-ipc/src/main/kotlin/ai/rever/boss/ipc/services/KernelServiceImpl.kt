@@ -167,6 +167,29 @@ class KernelServiceImpl(
         processId: String,
         registeredBefore: Long = Long.MAX_VALUE,
     ): Boolean {
+        val evicted = evictProcess(processId, registeredBefore)
+        if (evicted) {
+            logger.info("Deregistered process after failure: id={}", processId)
+        }
+        return evicted
+    }
+
+    /**
+     * Single eviction site for both deregistration paths: the clean [requestShutdown] flow
+     * and the crash path via [deregisterProcess].
+     *
+     * Compare-and-remove on [registeredBefore] (#1612): only a registration older than it is
+     * dropped, and only a heartbeat older than it. The default, [Long.MAX_VALUE], drops both
+     * unconditionally - [requestShutdown]'s behaviour, unchanged. The heartbeat is guarded on its
+     * own rather than only after an eviction because [heartbeat] records a timestamp for any
+     * authenticated process, registered or not, and the shutdown path has always cleared it.
+     *
+     * @return true if a registration was dropped.
+     */
+    private fun evictProcess(
+        processId: String,
+        registeredBefore: Long = Long.MAX_VALUE,
+    ): Boolean {
         var evicted = false
         registeredProcesses.computeIfPresent(processId) { _, info ->
             if (info.registeredAt < registeredBefore) {
@@ -176,20 +199,7 @@ class KernelServiceImpl(
                 info
             }
         }
-        if (evicted) {
-            lastHeartbeats.computeIfPresent(processId) { _, last -> if (last < registeredBefore) null else last }
-            logger.info("Deregistered process after failure: id={}", processId)
-        }
-        return evicted
-    }
-
-    /**
-     * Single eviction site for both deregistration paths: the clean [requestShutdown] flow
-     * and the crash path via [deregisterProcess].
-     */
-    private fun evictProcess(processId: String): Boolean {
-        val evicted = registeredProcesses.remove(processId) != null
-        lastHeartbeats.remove(processId)
+        lastHeartbeats.computeIfPresent(processId) { _, last -> if (last < registeredBefore) null else last }
         return evicted
     }
 

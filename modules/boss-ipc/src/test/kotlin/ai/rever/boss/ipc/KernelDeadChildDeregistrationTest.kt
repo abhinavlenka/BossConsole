@@ -94,14 +94,12 @@ class KernelDeadChildDeregistrationTest {
                         host.channelFor("alpha", ADDRESS_ALPHA),
                     )
                 assertTrue(alpha.registerProcess(registration("alpha", ADDRESS_ALPHA)).success)
-                Thread.sleep(5)
-                val firstReport = System.currentTimeMillis()
+                val firstReport = afterTheClockTicks()
                 val secondReport = firstReport // the duplicate observes the same dead handle
-                Thread.sleep(5)
 
                 // First report: evict the dead child, then the respawn re-registers the id.
                 assertTrue(kernel.deregisterProcess("alpha", registeredBefore = firstReport))
-                Thread.sleep(5)
+                afterTheClockTicks() // the replacement registers strictly after the death was seen
                 assertTrue(alpha.registerProcess(registration("alpha", ADDRESS_ALPHA)).success)
 
                 // Second report of the same death, handled after the replacement registered.
@@ -121,9 +119,8 @@ class KernelDeadChildDeregistrationTest {
             val kernel = KernelServiceImpl()
             IpcTestServer(kernel).use { host ->
                 register(host, "alpha", ADDRESS_ALPHA)
-                Thread.sleep(5)
 
-                assertTrue(kernel.deregisterProcess("alpha", registeredBefore = System.currentTimeMillis()))
+                assertTrue(kernel.deregisterProcess("alpha", registeredBefore = afterTheClockTicks()))
                 assertNull(kernel.getLastHeartbeat("alpha"))
             }
         }
@@ -208,4 +205,15 @@ class KernelDeadChildDeregistrationTest {
         const val ADDRESS_BETA = "tcp://127.0.0.1:59002"
         const val ADDRESS_GAMMA = "tcp://127.0.0.1:59003"
     }
+}
+
+/**
+ * The first millisecond after now, spun for rather than slept to: `System.currentTimeMillis` can
+ * move in ~15.6 ms steps on Windows, so a fixed sleep does not guarantee two readings differ, and
+ * [KernelServiceImpl.deregisterProcess] compares registration time strictly (review on #1652).
+ */
+private fun afterTheClockTicks(): Long {
+    val start = System.currentTimeMillis()
+    while (System.currentTimeMillis() == start) Thread.onSpinWait()
+    return System.currentTimeMillis()
 }
