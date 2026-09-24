@@ -497,6 +497,81 @@ try {
         "! and # survive the quote check (got: $($plainBang.Trim()))"
     $noArgs = Invoke-BossLine $quoteBat ''
     Assert-True ($noArgs -match 'Error: No command specified') "no arguments still reports a missing command (got: $($noArgs.Trim()))"
+
+    # status, doctor, mcp and completion hand the rest to BOSS.exe as a bare
+    # %*, never through %~N, so a JSON argument keeps its quotes
+    # (docs/CLI.md: boss mcp invoke <tool> --args '{...}'). A stub stands in
+    # for BOSS.exe and prints what it was given.
+    $stubExe = Join-Path $quoteDir 'fake-boss.cmd'
+    Set-Content -Path $stubExe -Value "@echo FORWARDED:%*`r`n" -Encoding Ascii -NoNewline
+    $env:BOSS_EXE = $stubExe
+    try {
+        foreach ($line in @(
+            'mcp invoke search_workspace --args {"query":"x"}',
+            '"mcp" invoke search_workspace --args {"query":"x"}',
+            'status --format "json"',
+            'completion "powershell"'
+        )) {
+            $forwarded = Invoke-BossLine $quoteBat $line
+            Assert-True ($forwarded.Trim() -ceq "FORWARDED:$line") "a forwarded command keeps its quoted arguments: boss $line (got: $($forwarded.Trim()))"
+        }
+        # The first argument is read through %~1 whatever the command, and
+        # plugin reads %~2 and %~3 before it forwards, so both stay strict.
+        foreach ($payload in @(
+            'mcp"=="mcp" echo side-effect>quote-marker.txt & rem "',
+            'plugin x"=="x" echo side-effect>quote-marker.txt & rem "'
+        )) {
+            Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+            $strictOut = Invoke-BossLine $quoteBat $payload
+            Assert-True (-not (Test-Path $quoteMarker)) "still refused: boss $payload"
+            Assert-True ($strictOut -match 'an argument has a double quote inside it') "still refused with a reason: boss $payload"
+        }
+    } finally {
+        Remove-Item Env:\BOSS_EXE -ErrorAction SilentlyContinue
+    }
+
+    # The capture writes %* onto an echoed REM line. An escaped redirection,
+    # pipe or & reaches boss.bat unquoted; none of them may act there.
+    foreach ($line in @(
+        'a^>capture-gt.txt',
+        'a^>^>capture-gt.txt',
+        'a^|echo side-effect^>quote-marker.txt',
+        'a^&echo side-effect^>quote-marker.txt',
+        'a^<capture-lt.txt'
+    )) {
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $metaOut = Invoke-BossLine $quoteBat $line
+        $stray = @(Get-ChildItem $quoteDir -Name | Where-Object { $_ -notin @('boss.bat', 'boss-unchecked.bat', 'fake-boss.cmd') })
+        Assert-True ($stray.Count -eq 0) "the capture line does not act on: boss $line (created: $($stray -join ', '))"
+        Assert-True ($metaOut -match 'Error: Could not determine type for:') "boss $line still reaches detection (got: $($metaOut.Trim()))"
+    }
+
+    # Calls started together each check their own arguments: each claims its
+    # own capture directory, so none can read another's.
+    $batch = @(0..7 | ForEach-Object {
+        $line = if ($_ % 2) { "url `"https://example.com/n$_`"" } else { "x`"==`"x`" echo side-effect>quote-marker-$_.txt & rem `"" }
+        $psi = [System.Diagnostics.ProcessStartInfo]::new('cmd.exe')
+        $psi.Arguments = '/d /s /c ""' + $quoteBat + '" ' + $line + '"'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.WorkingDirectory = $quoteDir
+        $p = [System.Diagnostics.Process]::Start($psi)
+        [pscustomobject]@{ N = $_; Proc = $p; Out = $p.StandardOutput.ReadToEndAsync() }
+    })
+    foreach ($b in $batch) {
+        [void]$b.Proc.WaitForExit(60000)
+        $got = $b.Out.Result
+        if ($b.N % 2) {
+            Assert-True ($got -match [regex]::Escape("boss://url?url=https%3A%2F%2Fexample.com%2Fn$($b.N)")) `
+                "parallel call $($b.N) routed its own URL (got: $($got.Trim()))"
+        } else {
+            Assert-True (-not (Test-Path (Join-Path $quoteDir "quote-marker-$($b.N).txt"))) "parallel call $($b.N) ran nothing"
+            Assert-True ($got -match 'an argument has a double quote inside it') "parallel call $($b.N) was refused (got: $($got.Trim()))"
+        }
+    }
+    $leftover = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -ErrorAction SilentlyContinue)
+    Assert-True ($leftover.Count -eq 0) "every call removed its capture directory (left: $(($leftover | ForEach-Object Name) -join ', '))"
 } finally {
     Remove-Item $quoteDir -Recurse -ErrorAction SilentlyContinue
 }

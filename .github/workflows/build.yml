@@ -244,6 +244,14 @@ jobs:
         with:
           cache-read-only: false
 
+      - name: 🧪 boss.bat live cmd.exe probes (Windows)
+        # The script-tests job runs this script on Ubuntu, where only its
+        # source-shape checks can run. Here the live probes and their mutation
+        # checks run on the real cmd.exe (#1617). A few seconds, no Gradle.
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/test/test-boss-bat-urlencode.ps1
+
       - name: 🧹 Stop Kotlin Daemon (Windows)
         if: matrix.os == 'windows-latest'
         run: |

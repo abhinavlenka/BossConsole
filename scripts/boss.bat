@@ -26,22 +26,37 @@ REM before it parses the line, so a quote in the value closes that quote early:
 REM x"=="x" calc & rem " turns the first check into if "x"=="x" calc & rem ...
 REM and runs calc. Checking needs the raw text without cmd parsing it, and an
 REM echoed REM line is the one place cmd writes %* out untouched, so capture it
-REM there into a per-call file and read it back through a FOR variable.
-set "BOSS_ARGS_FILE=%TEMP%\boss-args-%RANDOM%%RANDOM%.tmp"
+REM there and read it back through a FOR variable.
+REM The capture goes in a directory this call claims with md, which fails when
+REM the directory exists: %RANDOM% is seeded from the clock, so two boss calls
+REM started together would otherwise share a file name and could each read and
+REM check the other's arguments. If no directory can be claimed, nothing is
+REM captured and :check_arg_quotes refuses the call.
 set "BOSS_RAW_ARGS="
+set "BOSS_ARGS_TRIES=0"
+:claim_args_dir
+set /a "BOSS_ARGS_TRIES+=1"
+set "BOSS_ARGS_DIR=%TEMP%\boss-args-%RANDOM%%RANDOM%%RANDOM%"
+md "%BOSS_ARGS_DIR%" >nul 2>&1 && goto :capture_args
+if %BOSS_ARGS_TRIES% lss 20 goto :claim_args_dir
+goto :check_args
+:capture_args
 setlocal
 for %%a in (1) do (
     set "prompt=$_"
     echo on
     for %%b in (1) do rem * #%*#
     @echo off
-) > "%BOSS_ARGS_FILE%"
+) > "%BOSS_ARGS_DIR%\args.txt"
 endlocal
-if exist "%BOSS_ARGS_FILE%" (
-    for /f "usebackq delims=" %%L in ("%BOSS_ARGS_FILE%") do set "BOSS_RAW_ARGS=%%L"
-    del "%BOSS_ARGS_FILE%" >nul 2>&1
-)
+for /f "usebackq delims=" %%L in ("%BOSS_ARGS_DIR%\args.txt") do set "BOSS_RAW_ARGS=%%L"
+rd /s /q "%BOSS_ARGS_DIR%" >nul 2>&1
+:check_args
 call :check_arg_quotes || exit /b 1
+REM The forwarded commands pass %* on, and the child has no use for these.
+set "BOSS_RAW_ARGS="
+set "BOSS_ARGS_DIR="
+set "BOSS_ARGS_TRIES="
 
 REM Check if no arguments provided
 if "%~1"=="" (
@@ -230,12 +245,21 @@ REM path or a URL needs, and it leaves no %~N that can carry a quote into the
 REM quoted reads above. So a " may only open at the start or after a space, and
 REM only close at the end or before a space. Delayed expansion is on here only:
 REM the value is already in a variable, and !var! reads are never re-parsed.
+REM The first argument is always checked. status, doctor, mcp and completion
+REM hand the rest to BOSS.exe as a bare %*, which cmd re-reads exactly as the
+REM caller's line was read, and nothing reads it through %~N first - so their
+REM arguments may hold quotes, as `boss mcp invoke tool --args {"q":"x"}` does.
+REM plugin is not one of them: it reads %~2 and %~3 before it forwards.
 :check_arg_quotes
 setlocal EnableDelayedExpansion
 if not defined BOSS_RAW_ARGS (
     echo Error: could not read the command-line arguments
     endlocal & exit /b 1
 )
+REM The captured line is `rem * #<arguments>#`; keep what is between the marks.
+REM cmd echoes it with a trailing space after the closing mark, so the spaces
+REM go first; without that the mark stays, and a quoted last argument reads as
+REM "...# with a quote that closes before a # rather than a space.
 set "rest=!BOSS_RAW_ARGS:*#=!"
 :check_arg_quotes_trim
 if defined rest if "!rest:~-1!"==" " set "rest=!rest:~0,-1!" & goto :check_arg_quotes_trim
@@ -252,7 +276,9 @@ set q=^"
 set "open="
 set "prev= "
 set "bad="
-for /l %%i in (0,1,!last!) do if not defined bad (
+set "first="
+set "done="
+for /l %%i in (0,1,!last!) do if not defined bad if not defined done (
     set "c=!rest:~%%i,1!"
     if "!c!"=="!q!" (
         if defined open (
@@ -264,6 +290,12 @@ for /l %%i in (0,1,!last!) do if not defined bad (
             if not "!prev!"==" " set "bad=1"
             set "open=1"
         )
+    )
+    if not defined first if not defined open if "!c!"==" " if not "!prev!"==" " (
+        set "first=!rest:~0,%%i!"
+        if "!first:~0,1!"=="!q!" set "first=!first:~1!"
+        if "!first:~-1!"=="!q!" set "first=!first:~0,-1!"
+        for %%v in (status doctor mcp completion) do if /i "!first!"=="%%v" set "done=1"
     )
     set "prev=!c!"
 )
