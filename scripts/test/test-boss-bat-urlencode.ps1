@@ -442,6 +442,9 @@ try {
 $quoteDir = Join-Path $env:TEMP ("boss-quote-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $quoteDir | Out-Null
 $quoteMarker = Join-Path $quoteDir 'quote-marker.txt'
+# Capture directories that were here before this section, so the leftover
+# check at the end only judges the ones these calls made.
+$argsDirsBefore = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -Name -ErrorAction SilentlyContinue)
 $neutralBat = (Get-Content $batPath -Raw) -replace "`r?`n", "`r`n" -replace 'start "" ', 'echo '
 $quoteBat = Join-Path $quoteDir 'boss.bat'
 Set-Content -Path $quoteBat -Value $neutralBat -Encoding Ascii -NoNewline
@@ -515,6 +518,19 @@ try {
             $forwarded = Invoke-BossLine $quoteBat $line
             Assert-True ($forwarded.Trim() -ceq "FORWARDED:$line") "a forwarded command keeps its quoted arguments: boss $line (got: $($forwarded.Trim()))"
         }
+        # cmd drops spaces in front of the first argument from %*, so they
+        # cannot hide the command name from the check.
+        $spaced = Invoke-BossLine $quoteBat '  mcp invoke search_workspace --args {"query":"x"}'
+        Assert-True ($spaced -match [regex]::Escape('FORWARDED:mcp invoke search_workspace --args {"query":"x"}')) `
+            "a forwarded command after leading spaces keeps its quoted arguments (got: $($spaced.Trim()))"
+        # What makes skipping arguments 2..N safe: they reach BOSS.exe only
+        # through %*, so a payload there is data. If a forwarded command ever
+        # reads %~2, this fails.
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $fwdPayload = 'mcp x"=="x" echo side-effect>quote-marker.txt & rem "'
+        $fwdOut = Invoke-BossLine $quoteBat $fwdPayload
+        Assert-True (-not (Test-Path $quoteMarker)) "a payload in a forwarded argument is data, not a command: boss $fwdPayload"
+        Assert-True ($fwdOut -match 'FORWARDED:') "it reaches the stub rather than being refused (got: $($fwdOut.Trim()))"
         # The first argument is read through %~1 whatever the command, and
         # plugin reads %~2 and %~3 before it forwards, so both stay strict.
         foreach ($payload in @(
@@ -570,7 +586,31 @@ try {
             Assert-True ($got -match 'an argument has a double quote inside it') "parallel call $($b.N) was refused (got: $($got.Trim()))"
         }
     }
-    $leftover = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -ErrorAction SilentlyContinue)
+    # A capture directory that is already there is never read. A copy that
+    # draws the same name every time stands in for two calls that drew the
+    # same %RANDOM% values: it finds the name taken by a directory holding
+    # someone else's arguments, and refuses rather than check those.
+    $fixedName = 'boss-args-1617fixed'
+    $fixedBat = Join-Path $quoteDir 'boss-fixed-name.bat'
+    Assert-True ($neutralBat.Contains('boss-args-%RANDOM%%RANDOM%%RANDOM%')) 'the capture directory name is where the collision check expects it'
+    Set-Content -Path $fixedBat -Encoding Ascii -NoNewline `
+        -Value ($neutralBat.Replace('boss-args-%RANDOM%%RANDOM%%RANDOM%', $fixedName))
+    $takenDir = Join-Path $env:TEMP $fixedName
+    New-Item -ItemType Directory -Path $takenDir -Force | Out-Null
+    try {
+        Set-Content -Path (Join-Path $takenDir 'args.txt') -Encoding Ascii -Value 'rem * #url "https://example.com/other-call"# '
+        Remove-Item $quoteMarker -ErrorAction SilentlyContinue
+        $takenOut = Invoke-BossLine $fixedBat 'x"=="x" echo side-effect>quote-marker.txt & rem "'
+        Assert-True (-not (Test-Path $quoteMarker)) 'a taken capture directory does not let a payload through'
+        Assert-True ($takenOut -match 'could not read the command-line arguments') `
+            "a taken capture directory is refused, not read (got: $($takenOut.Trim()))"
+        Assert-True ($takenOut -notmatch 'other-call') 'the other call''s arguments are never used'
+    } finally {
+        Remove-Item $takenDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $leftover = @(Get-ChildItem $env:TEMP -Directory -Filter 'boss-args-*' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notin $argsDirsBefore })
     Assert-True ($leftover.Count -eq 0) "every call removed its capture directory (left: $(($leftover | ForEach-Object Name) -join ', '))"
 } finally {
     Remove-Item $quoteDir -Recurse -ErrorAction SilentlyContinue

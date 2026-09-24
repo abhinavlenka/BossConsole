@@ -49,7 +49,7 @@ for %%a in (1) do (
     @echo off
 ) > "%BOSS_ARGS_DIR%\args.txt"
 endlocal
-for /f "usebackq delims=" %%L in ("%BOSS_ARGS_DIR%\args.txt") do set "BOSS_RAW_ARGS=%%L"
+if exist "%BOSS_ARGS_DIR%\args.txt" for /f "usebackq delims=" %%L in ("%BOSS_ARGS_DIR%\args.txt") do set "BOSS_RAW_ARGS=%%L"
 rd /s /q "%BOSS_ARGS_DIR%" >nul 2>&1
 :check_args
 call :check_arg_quotes || exit /b 1
@@ -302,6 +302,7 @@ for /l %%i in (0,1,!last!) do if not defined bad if not defined done (
 if defined bad (
     echo Error: an argument has a double quote inside it.
     echo Quote a whole argument, e.g. boss file "C:\My Files\a.txt". In a URL, write a quote as %%22.
+    echo For a terminal command that needs a quote, run boss.ps1 instead.
     endlocal & exit /b 1
 )
 endlocal & exit /b 0
