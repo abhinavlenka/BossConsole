@@ -203,15 +203,19 @@ class DefaultMcpRiskEvaluator : McpRiskEvaluator {
     }
 
     /**
-     * `format` as the command itself: the first word of a command, or followed by a volume
-     * (`cmd /c format d:`). It used to be matched as the text `format ` anywhere, which rated
-     * `docker ps --format json`, `clang-format -i x.c` and plain English typed into a terminal
-     * CRITICAL, so a saved "Always Allow" asked again for all of them (#1655). A sentence that
-     * starts with the word still rates CRITICAL; that errs toward asking.
+     * `format` as the command itself: the first word of a command, or with a volume anywhere after
+     * it (`cmd /c format d:`, `cmd /c format /q /fs:ntfs e:` - switches may come first). It used to
+     * be matched as the text `format ` anywhere, which rated `docker ps --format json`,
+     * `clang-format -i x.c` and plain English typed into a terminal CRITICAL, so a saved "Always
+     * Allow" asked again for all of them (#1655). None of those carries a drive letter. A sentence
+     * that starts with the word still rates CRITICAL; that errs toward asking.
+     *
+     * [tokens] arrive lowercased ([evaluateShellCommand] lowercases the payload), which is what
+     * lets [VOLUME] and [FORMAT_COMMANDS] be written in lower case only.
      */
     private fun isFormatCommand(tokens: List<String>): Boolean =
         tokens.indices.any { i ->
-            tokens[i] in FORMAT_COMMANDS && (i == 0 || tokens.getOrNull(i + 1)?.matches(VOLUME) == true)
+            tokens[i] in FORMAT_COMMANDS && (i == 0 || tokens.drop(i + 1).any { it.matches(VOLUME) })
         }
 
     /**

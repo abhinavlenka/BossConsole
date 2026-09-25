@@ -215,6 +215,24 @@ class McpDestructiveShellAllowTest {
             assertEquals(2, handlerRuns)
         }
 
+    // Review on #1698: the flag means "a saved ALLOW was overridden", not "this call was
+    // destructive". With no saved rule the tool's policy is already ASK, so there is nothing to
+    // override and YOLO answers the destructive call exactly as it answers any other. Pinned so
+    // the limit stays deliberate; recording the assessed risk on every row would be what widens it.
+    @Test
+    fun `a destructive call YOLO mode runs under the default ASK policy is not marked escalated`() =
+        runBlocking {
+            val core = core("run_command", allowEachTool = false)
+            core.setYoloMode(true)
+
+            assertFalse(core.invoke("run_command", command("rm -rf /srv/app")).isError)
+
+            val row = ledger.recentOperations.value.first { it.toolName == "run_command" }
+            assertEquals(McpPolicyAction.ASK, row.policyApplied)
+            assertEquals(McpApprovalDisposition.YOLO_ALLOWED, row.approvalDisposition)
+            assertFalse(row.escalated, "no saved ALLOW was overridden, so this is not an escalation")
+        }
+
     // Review on #1650: the deny half of "Always" is the durable answer that does hold on an
     // escalated prompt - the gate only ever rewrites ALLOW - so it must still be saved.
     @Test

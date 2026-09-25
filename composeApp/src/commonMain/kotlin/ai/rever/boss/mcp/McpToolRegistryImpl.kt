@@ -1288,7 +1288,9 @@ internal class McpToolRegistryCore(
         args: McpToolArgs,
         policy: McpPolicyAction,
         revocation: Long,
-        escalated: Boolean = false,
+        // No default: a caller that forgot it would silently answer "not escalated", which is the
+        // direction that lets a broader approval stick.
+        escalated: Boolean,
         secretRefs: List<SecretDescriptor> = emptyList(),
     ): Pair<McpApprovalDisposition, String?> =
         when (policy) {

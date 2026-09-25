@@ -266,6 +266,9 @@ class McpRiskEvaluatorTest {
             "rm -f build -R",
             "format d: /q",
             "cmd /c format e: /fs:ntfs",
+            // Review on #1698: switches before the volume, the order format's own help prints.
+            "cmd /c format /q e:",
+            "cmd /c format /fs:ntfs /v:data e:",
             "dir && format f:",
         )) {
             val level = evaluator.evaluateRisk("run_command", commandArgs(command)).level
