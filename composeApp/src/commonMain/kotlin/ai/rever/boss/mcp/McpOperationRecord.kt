@@ -32,6 +32,14 @@ data class McpOperationRecord(
      */
     val secretRefs: List<String> = emptyList(),
     /**
+     * True when a saved ALLOW did not cover this call: the risk evaluator rated a shell call
+     * CRITICAL, so it was asked about again (#1577). With [policyApplied] and
+     * [approvalDisposition] this tells a destructive call that YOLO mode ran unattended
+     * (`YOLO_ALLOWED`) apart from a routine one (#1655). `false` for every other call, and for
+     * records written before this field existed, which decode with the default.
+     */
+    val escalated: Boolean = false,
+    /**
      * SHA-256 over [parentHash] and this record's [canonicalFormForHashing], so a record edited
      * after the fact no longer agrees with the chain that follows it.
      *
@@ -82,5 +90,9 @@ internal fun McpOperationRecord.canonicalFormForHashing(): String =
         put("errorSnippet", errorSnippet)
         if (secretRefs.isNotEmpty()) {
             put("secretRefs", JsonArray(secretRefs.map(::JsonPrimitive)))
+        }
+        // Written only when set, like secretRefs, so every record without it hashes as it did.
+        if (escalated) {
+            put("escalated", true)
         }
     }.toString()

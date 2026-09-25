@@ -2293,7 +2293,11 @@ applies any broader approval of an escalated call as once, logging the downgrade
 never overridden, so it is the durable answer there (#1624). Shell tools are rated on every
 string in their arguments. Arguments nested past MAX_MCP_ARGUMENT_DEPTH rate CRITICAL without being
 parsed (every parse on the invoke path checks the same depth guard first); arguments too wide to
-scan fully rate CRITICAL on the part that was not inspected.
+scan fully rate CRITICAL on the part that was not inspected. The call's ledger row carries
+`escalated: true` too, so a destructive call that YOLO mode answered (`YOLO_ALLOWED`) can be told
+apart from a routine one afterwards (#1655). `format` counts only as a command (the first word
+of a command, or followed by a drive such as `d:`), not as the text `format ` anywhere, which
+rated `--format json`, `clang-format` and prose typed through `send_input` CRITICAL.
 
 ### Secret references at the governance boundary
 
