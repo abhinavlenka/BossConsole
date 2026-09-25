@@ -7,33 +7,81 @@ import kotlinx.serialization.SerializationException
  *
  * Log these instead of passing the exception as `error = e`. kotlinx appends the whole offending
  * document to a malformed-input error (`JSON input: ...`), and even the diagnostic before it can
- * quote a value (`Failed to parse literal '...'`). For the files this is used on, that document is
- * visited URLs with their query strings, the domains a user zoomed, or their keymap, and a log
- * line is what people attach to bug reports (#1629, #1695).
+ * quote a value (`Failed to parse ... for input '...'`). For the files this is used on, that
+ * document is visited URLs with their query strings, the domains a user zoomed, or their keymap,
+ * and a log line is what people attach to bug reports (#1629, #1695).
  *
  * So this keeps only what cannot carry the document: the exception type, the offset the decoder
  * stopped at, and the JSON path, with map keys masked because a map key is data (the zoom settings
- * key their map by domain). Where the caller also moves the file aside, the preserved copy holds
- * the full document for anyone diagnosing it. The Supabase decoders keep their own
- * `sanitizeSupabaseFailure`, which returns a throwable for `Result.failure` rather than log fields.
+ * key their map by domain). Both are read from the diagnostic only, never from the appended
+ * document, and both must look like what kotlinx writes or they are left out: a value can quote
+ * the markers this looks for, and a quoted value comes BEFORE the genuine ones.
+ *
+ * This never throws. It runs inside the caller's `catch (e: SerializationException)`, where a throw
+ * would skip the caller's recovery (moving the file aside, writing defaults back).
+ *
+ * Where the caller also moves the file aside, the preserved copy holds the full document for anyone
+ * diagnosing it. Two neighbours are deliberately separate: the Supabase decoders use
+ * `sanitizeSupabaseFailure`, which returns a throwable for `Result.failure`, and
+ * `SelfHealingSettingsManager.reportUnreadableKeys` logs the exception type alone because that file
+ * holds API keys. Do not unify that one down to this.
  */
 internal fun decodeFailure(error: SerializationException): Map<String, Any?> {
-    val message = error.message.orEmpty()
+    // Everything after the marker is the file; nothing below may search it.
+    val diagnostic = error.message.orEmpty().substringBefore(JSON_INPUT_MARKER)
     return buildMap {
         put("decodeFailure", error::class.simpleName ?: "SerializationException")
-        OFFSET.find(message)?.let { put("offset", it.groupValues[1].toInt()) }
-        PATH.find(message)?.let { put("path", it.groupValues[1].replace(MAP_KEY, "[*]")) }
+        offsetOf(diagnostic)?.let { put("offset", it) }
+        pathOf(diagnostic)?.let { put("path", it) }
     }
 }
 
-/** `at offset 73`, as kotlinx words a parse error's position. */
-private val OFFSET = Regex("""\bat offset (\d+)""")
-
-/** `at path: $.pages[3].url`. Stops at the first whitespace, which a path contains only in a map key. */
-private val PATH = Regex("""\bat path: (\$\S*)""")
+/** kotlinx's separator between its diagnostic and the document it appends. */
+private const val JSON_INPUT_MARKER = "\nJSON input:"
 
 /**
- * A map key segment of a path, `['example.com']`, which is data rather than structure. A key with a
- * space in it ends the path match early, so an unclosed segment runs to the end and is masked too.
+ * `at offset 73`, only where kotlinx puts it: at the start of the diagnostic, before anything it
+ * quotes (`Unexpected JSON token at offset 73: ...`). A quoted value cannot supply it, and an
+ * out-of-range number is dropped rather than thrown.
  */
-private val MAP_KEY = Regex("""\['.*?(?:'\]|$)""")
+private fun offsetOf(diagnostic: String): Int? =
+    LEADING_OFFSET
+        .find(diagnostic)
+        ?.groupValues
+        ?.get(1)
+        ?.toIntOrNull()
+
+private val LEADING_OFFSET = Regex("""^[^']*?\bat offset (\d+)""")
+
+/**
+ * The JSON path, from the LAST `at path: ` in the first line of the diagnostic: kotlinx appends
+ * the genuine path at the end of its message, after any value it quotes. The map keys in it are
+ * masked, and the result must then be pure structure (`$`, `.field`, `[3]`, `[*]`), or it is left
+ * out: a marker that came from inside a key or a value is followed by that text, not by a path.
+ */
+private fun pathOf(diagnostic: String): String? {
+    val line = diagnostic.substringBefore('\n')
+    val marker = line.lastIndexOf(PATH_MARKER)
+    if (marker < 0) return null
+    val masked = maskMapKeys(line.substring(marker + PATH_MARKER.length))
+    return masked.takeIf { STRUCTURAL_PATH.matches(it) }
+}
+
+private const val PATH_MARKER = " at path: "
+
+/**
+ * Masks from the first map key's `['` to the last `']` as one `[*]`, or to the end when no `']`
+ * follows. Index arithmetic rather than a regex, so no character in a key (a quote and a bracket,
+ * a Unicode line separator) can end the mask early. Two keys and the fields between them collapse
+ * into one `[*]`, which is the safe direction.
+ */
+private fun maskMapKeys(path: String): String {
+    val start = path.indexOf("['")
+    if (start < 0) return path
+    val end = path.lastIndexOf("']")
+    val rest = if (end > start) path.substring(end + 2) else ""
+    return path.substring(0, start) + "[*]" + rest
+}
+
+/** A JSON path with nothing in it but structure: object fields, list indices and masked keys. */
+private val STRUCTURAL_PATH = Regex("""\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+]|\[\*])*""")

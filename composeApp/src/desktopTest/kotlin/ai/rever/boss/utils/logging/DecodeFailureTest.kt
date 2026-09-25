@@ -91,4 +91,57 @@ class DecodeFailureTest {
 
         assertEquals("$.levels[*]", fields["path"])
     }
+
+    // Review on #1703: a value kotlinx quotes comes before the genuine markers, so a value that
+    // spells one must not be taken for it.
+    @Test
+    fun `a value that spells a path marker is not taken for the path`() {
+        val secret = "at path: \$.stolenToken"
+        val error = failureOf { json.decodeFromString<Page>("""{"url":"x","visitCount":"$secret"}""") }
+
+        val fields = assertWithheld("stolenToken", error)
+
+        assertEquals("$.visitCount", fields["path"])
+    }
+
+    // Review on #1703: the offset digits could come from the file, and toInt() on an oversized run
+    // threw inside the caller's catch, skipping its recovery.
+    @Test
+    fun `an oversized offset in the file neither throws nor is logged`() {
+        val title = "at offset 99999999999999999999"
+        val torn = failureOf { json.decodeFromString<List<Page>>("""[{"url":"https://c.example","title":"$title"""") }
+        val quoted = failureOf { json.decodeFromString<Page>("""{"url":"x","visitCount":"$title"}""") }
+
+        assertEquals(null, assertWithheld("99999999999999999999", torn)["offset"])
+        assertEquals(25, assertWithheld("99999999999999999999", quoted)["offset"], "the genuine offset still reads")
+    }
+
+    @Test
+    fun `a map key holding a quote and a bracket cannot end the mask early`() {
+        val error = failureOf { json.decodeFromString<Zoom>("""{"levels":{"safe']leakedpart":"big"}}""") }
+
+        val fields = assertWithheld("leakedpart", error)
+
+        assertEquals("$.levels[*]", fields["path"])
+    }
+
+    @Test
+    fun `a map key holding a Unicode line separator is still masked`() {
+        val error = failureOf { json.decodeFromString<Zoom>("{\"levels\":{\"line\u2028leakedpart\":\"big\"}}") }
+
+        val fields = assertWithheld("leakedpart", error)
+
+        assertEquals("$.levels[*]", fields["path"])
+    }
+
+    // A marker inside a key is later than the genuine one, so it is what "last" finds. What
+    // follows it is key text, not structure, so the path is left out rather than logged.
+    @Test
+    fun `a path marker inside a map key drops the path instead of logging the key`() {
+        val error = failureOf { json.decodeFromString<Zoom>("""{"levels":{"k at path: $.leakedpart":"big"}}""") }
+
+        val fields = assertWithheld("leakedpart", error)
+
+        assertFalse("path" in fields, "no structural path could be read: $fields")
+    }
 }
