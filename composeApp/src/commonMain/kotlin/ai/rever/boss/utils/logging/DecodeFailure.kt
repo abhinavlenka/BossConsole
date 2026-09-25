@@ -67,7 +67,11 @@ private const val OFFSET_SCAN_CHARS = 200
  *
  * A quoted value with a newline in it moves the genuine path off the first line, which then ends
  * inside that value's quotes. kotlinx quotes in pairs, so an odd number of `'` before the marker
- * is that case, and the path is left out rather than read from the value.
+ * usually means that case, and the path is left out. This is a heuristic, not a proof: kotlinx does
+ * not escape an apostrophe inside a value it quotes, so a value can restore the parity (and an
+ * ordinary `it's` can break it, dropping a genuine path). What bounds the outcome is
+ * [STRUCTURAL_PATH]: whatever gets through is `$`, `.identifier`, `[N]` and `[*]` only, so no URL,
+ * domain, file path or token can.
  */
 private fun pathOf(diagnostic: String): String? {
     val line = diagnostic.substringBefore('\n')

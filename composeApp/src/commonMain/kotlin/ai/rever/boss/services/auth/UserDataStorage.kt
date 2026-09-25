@@ -223,6 +223,14 @@ object UserDataStorage {
         if (!storageFile.exists()) return false
         return try {
             json.decodeFromString<StoredUserData>(storageFile.readText()).pluginWizardCompleted
+        } catch (e: kotlinx.serialization.SerializationException) {
+            // Not e.toString(): that is the decoder's message, which quotes the record.
+            logger.debug(
+                LogCategory.AUTH,
+                "Could not read stored wizard status - assuming false",
+                decodeFailure(e),
+            )
+            false
         } catch (e: Exception) {
             logger.debug(
                 LogCategory.AUTH,
@@ -302,6 +310,11 @@ object UserDataStorage {
                     logger.debug(LogCategory.AUTH, "No stored user data found")
                     null
                 }
+            } catch (e: kotlinx.serialization.SerializationException) {
+                // The startup path: a torn record would otherwise put the email and id in the
+                // log on every launch.
+                logger.error(LogCategory.AUTH, "Error loading user data", decodeFailure(e))
+                null
             } catch (e: Exception) {
                 logger.error(LogCategory.AUTH, "Error loading user data", error = e)
                 null
