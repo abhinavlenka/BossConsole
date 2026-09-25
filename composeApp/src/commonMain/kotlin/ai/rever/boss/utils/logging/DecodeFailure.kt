@@ -46,23 +46,34 @@ private const val JSON_INPUT_MARKER = "\nJSON input:"
  */
 private fun offsetOf(diagnostic: String): Int? =
     LEADING_OFFSET
-        .find(diagnostic)
+        // kotlinx puts it within its first few words; bounded so the scan never walks a long
+        // message, should a kotlinx version stop writing the JSON input marker it is cut at.
+        .find(diagnostic.take(OFFSET_SCAN_CHARS))
         ?.groupValues
         ?.get(1)
         ?.toIntOrNull()
 
 private val LEADING_OFFSET = Regex("""^[^']*?\bat offset (\d+)""")
 
+private const val OFFSET_SCAN_CHARS = 200
+
 /**
  * The JSON path, from the LAST `at path: ` in the first line of the diagnostic: kotlinx appends
  * the genuine path at the end of its message, after any value it quotes. The map keys in it are
  * masked, and the result must then be pure structure (`$`, `.field`, `[3]`, `[*]`), or it is left
  * out: a marker that came from inside a key or a value is followed by that text, not by a path.
+ * A field whose serial name is not an ASCII identifier (`@SerialName("plugin-id")`) drops the
+ * path the same way. That is the intended direction; do not widen [STRUCTURAL_PATH] to fit one.
+ *
+ * A quoted value with a newline in it moves the genuine path off the first line, which then ends
+ * inside that value's quotes. kotlinx quotes in pairs, so an odd number of `'` before the marker
+ * is that case, and the path is left out rather than read from the value.
  */
 private fun pathOf(diagnostic: String): String? {
     val line = diagnostic.substringBefore('\n')
     val marker = line.lastIndexOf(PATH_MARKER)
-    if (marker < 0) return null
+    // Counted before the marker only: a map key's own quotes belong to the path after it.
+    if (marker < 0 || line.substring(0, marker).count { it == '\'' } % 2 != 0) return null
     val masked = maskMapKeys(line.substring(marker + PATH_MARKER.length))
     return masked.takeIf { STRUCTURAL_PATH.matches(it) }
 }

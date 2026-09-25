@@ -2,6 +2,9 @@ package ai.rever.boss.services.auth
 
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.services.supabase.models.UserInfo
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogEntry
+import ai.rever.boss.utils.logging.LogListener
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -12,6 +15,7 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -41,6 +45,41 @@ class UserDataStorageWizardTest {
         UserDataStorage.resetForTesting(BossDirectories.rootDir)
         workDir.deleteRecursively()
     }
+
+    // Review on #1703: both corrupt-record arms logged the decoder's exception, whose message
+    // quotes the record - the user's email and id - into the log people attach to bug reports.
+    @Test
+    fun `a torn user record is logged without its email or id`() =
+        runBlocking {
+            val email = "leak-${System.nanoTime()}@example.com"
+            val userId = "user-id-${System.nanoTime()}"
+            UserDataStorage.storageFile.writeText("""{"id":"$userId","email":"$email","createdAt":""")
+            val entries = mutableListOf<LogEntry>()
+            val listener = LogListener { entry -> synchronized(entries) { entries += entry } }
+
+            BossLogger.addListener(listener)
+            try {
+                UserDataStorage.setPluginWizardCompleted(true)
+                UserDataStorage.isPluginWizardCompleted()
+            } finally {
+                BossLogger.removeListener(listener)
+            }
+
+            val logged = synchronized(entries) { entries.toList() }
+            val corrupt =
+                logged.filter {
+                    it.message.startsWith("User data file corrupted") ||
+                        it.message.startsWith("user_data.json undecodable")
+                }
+            assertEquals(2, corrupt.size, "both corrupt-record arms must log: $logged")
+            for (entry in corrupt) {
+                assertNull(entry.error, "the decoder's exception quotes the record, so it must not be attached")
+            }
+            for (entry in logged) {
+                val text = "${entry.message} ${entry.data} ${entry.error}"
+                assertFalse(email in text || userId in text, "leaked in: $entry")
+            }
+        }
 
     @Test
     fun `completion is persisted via the pending marker when the stored record is corrupt`() =

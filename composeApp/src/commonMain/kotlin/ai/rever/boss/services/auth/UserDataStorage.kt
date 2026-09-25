@@ -6,6 +6,7 @@ import ai.rever.boss.utils.atomicWriteText
 import ai.rever.boss.utils.logging.BossLogger
 import ai.rever.boss.utils.logging.LogCategory
 import ai.rever.boss.utils.logging.LogSanitizer
+import ai.rever.boss.utils.logging.decodeFailure
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -352,10 +353,12 @@ object UserDataStorage {
                             return@withContext true
                         }
                     } catch (e: kotlinx.serialization.SerializationException) {
+                        // Never error = e: the decoder's message quotes the record, which is the
+                        // user's email and id.
                         logger.error(
                             LogCategory.SYSTEM,
                             "User data file corrupted, will reset on next save",
-                            error = e,
+                            decodeFailure(e),
                         )
                         // Don't delete here - let next save handle it
                         // Fall through to check pending file
@@ -431,7 +434,7 @@ object UserDataStorage {
                             logger.warn(
                                 LogCategory.AUTH,
                                 "user_data.json undecodable; persisting wizard status via pending marker",
-                                error = e,
+                                decodeFailure(e),
                             )
                             pendingWizardCompletedFile.atomicWriteText(completed.toString())
                         }

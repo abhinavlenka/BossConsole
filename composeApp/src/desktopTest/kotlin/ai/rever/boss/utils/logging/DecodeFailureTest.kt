@@ -82,8 +82,8 @@ class DecodeFailureTest {
     }
 
     @Test
-    fun `a map key with a space in it is masked even though it cuts the path short`() {
-        // The path match stops at the space, leaving an unclosed `['intranetbank` to mask.
+    fun `a map key with a space in it is masked whole`() {
+        // A realistic key shape; the whole key, space and all, sits inside the masked segment.
         val key = "intranetbank login.example"
         val error = failureOf { json.decodeFromString<Zoom>("""{"levels":{"$key":"big"}}""") }
 
@@ -132,6 +132,20 @@ class DecodeFailureTest {
         val fields = assertWithheld("leakedpart", error)
 
         assertEquals("$.levels[*]", fields["path"])
+    }
+
+    // Review on #1703: a value with a newline in it pushes the genuine path off the first line, and
+    // the last marker left there is the one the value spelled.
+    @Test
+    fun `a value that spans lines cannot supply the path`() {
+        val error =
+            failureOf {
+                json.decodeFromString<Zoom>("{\"levels\":{\"k\":\"a at path: \$.leakedpart\\nrest\"}}")
+            }
+
+        val fields = assertWithheld("leakedpart", error)
+
+        assertFalse("path" in fields, "the first line ends inside the value, so no path is read: $fields")
     }
 
     // A marker inside a key is later than the genuine one, so it is what "last" finds. What
