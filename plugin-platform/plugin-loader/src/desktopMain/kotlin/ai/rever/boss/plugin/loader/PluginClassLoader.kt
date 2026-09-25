@@ -438,13 +438,7 @@ class PluginClassLoader(
             // straggler thread made the late request (a Ktor worker, a
             // coroutine dispatcher, an AWT handler) and can tear that thread
             // down mid-teardown.
-            val refusal =
-                ClassNotFoundException(
-                    "Plugin classloader for '$pluginId' is $stateAtRefusal; refusing to resolve " +
-                        "'$name' against the host classloader. Something still referenced the " +
-                        "plugin after it was unloaded - that reference is the bug.",
-                    notInPluginJar,
-                )
+            val refusal = PluginUnloadRefusal(pluginId, stateAtRefusal, name, notInPluginJar)
             // WARN, not ERROR: refusing is the correct outcome and teardown
             // continues. The throwable is attached so the first entry for a name
             // carries the straggler's stack; repeats drop to DEBUG so a retry
@@ -538,3 +532,26 @@ class PluginClassLoader(
 
     override fun toString(): String = "PluginClassLoader(pluginId=$pluginId, state=$state, urls=${getURLs().size})"
 }
+
+/**
+ * The [ClassNotFoundException] a [PluginClassLoader] answers with when it is asked for a class
+ * after its plugin began unloading, instead of delegating to the host (see the comment in
+ * `PluginClassLoader.loadClassChildFirst` for why delegating would be wrong).
+ *
+ * A type of its own so the host can recognise the refusal without reading its message: the JVM
+ * turns it into a `NoClassDefFoundError` at the resolution site and keeps it as that error's
+ * cause, so a crash handler walking the cause chain finds it by type. Still a
+ * [ClassNotFoundException], because that is what `loadClass` declares and what every caller,
+ * the JVM's own resolution machinery included, already handles.
+ */
+class PluginUnloadRefusal(
+    val pluginId: String,
+    val loaderState: ClassLoaderState,
+    val className: String,
+    cause: ClassNotFoundException,
+) : ClassNotFoundException(
+        "Plugin classloader for '$pluginId' is $loaderState; refusing to resolve " +
+            "'$className' against the host classloader. Something still referenced the " +
+            "plugin after it was unloaded - that reference is the bug.",
+        cause,
+    )

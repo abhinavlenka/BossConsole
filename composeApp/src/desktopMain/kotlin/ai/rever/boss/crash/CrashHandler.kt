@@ -1,6 +1,7 @@
 package ai.rever.boss.crash
 
 import ai.rever.boss.plugin.loader.PluginClassLoader
+import ai.rever.boss.plugin.loader.PluginUnloadRefusal
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.plugin.sandbox.PluginExecutionBoundary
 import ai.rever.boss.plugin.sandbox.ui.PluginRecoveryQuarantine
@@ -236,12 +237,16 @@ object CrashHandler {
     /**
      * A plugin classloader refusing a class request after the plugin was unloaded.
      *
-     * `PluginClassLoader` answers a late request with `ClassNotFoundException` **on purpose** -
-     * delegating to the host would splice two class graphs together - and the JVM turns that
-     * into a `NoClassDefFoundError` at the resolution site, on whatever straggler thread made
-     * the request: a Ktor selector actor, a coroutine dispatcher, an AWT handler. Nothing is
-     * broken at that point; the refusal is the protection working, and the loader has already
-     * logged it at WARN with the straggler's stack.
+     * `PluginClassLoader` answers a late request with a [PluginUnloadRefusal] (a
+     * `ClassNotFoundException`) **on purpose** - delegating to the host would splice two class
+     * graphs together. When the request is the JVM resolving a symbolic reference in a plugin
+     * class (a `new`, a field or method reference its code reaches only now), resolution fails
+     * with a `NoClassDefFoundError` at that site, on whatever straggler thread made the request:
+     * a Ktor selector actor, a coroutine dispatcher, an AWT handler. The JVM keeps the loader's
+     * exception as that error's cause, which is how [isIgnorable]'s walk over the cause chain
+     * reaches the refusal; `PluginTeardownRefusalIntegrationTest` drives exactly that through a
+     * real loader and a real unload. Nothing is broken at that point; the refusal is the
+     * protection working, and the loader has already logged it at WARN with the straggler's stack.
      *
      * What followed was not benign: the refusal reached the uncaught handler during an ordinary
      * unload - a plugin update, a reload, a sign-out - and was classified as a crash. Recovery
@@ -251,18 +256,14 @@ object CrashHandler {
      * risa-labs-inc/boss-plugin-terminal-tab#69 (terminaltab, macOS), #71 (fluckbrowser, then
      * terminaltab - "On sign out get this"), #76 (terminaltab, Windows).
      *
-     * Matched on the two stable fragments of the loader's own sentence rather than on the whole
-     * message or on `NoClassDefFoundError` in general: the dash in it changed from an em-dash to
-     * a hyphen between 9.4.0 and 9.4.13, and a class genuinely missing from a live plugin's jar
-     * must still be reported. The straggler reference remains the bug; this only stops the
+     * Matched by the loader's own refusal type, not by its message or by `NoClassDefFoundError`
+     * in general. The loader and this handler ship in the same build, so the type cannot drift
+     * the way the sentence did (its dash changed between 9.4.0 and 9.4.13). And a class
+     * genuinely missing from a live plugin's jar arrives as a plain `ClassNotFoundException`, so
+     * it is still reported. The straggler reference remains the bug; this only stops the
      * teardown artifact from being shown to the user as a crash.
      */
-    internal fun isPluginTeardownRefusal(throwable: Throwable): Boolean {
-        val message = throwable.message ?: return false
-        return throwable is ClassNotFoundException &&
-            message.startsWith("Plugin classloader for") &&
-            message.contains("refusing to resolve")
-    }
+    internal fun isPluginTeardownRefusal(throwable: Throwable): Boolean = throwable is PluginUnloadRefusal
 
     /**
      * supabase-kt 3.8.0 can resume scheduleRejoin during the socket reconnect delay.
