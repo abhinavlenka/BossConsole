@@ -1,7 +1,6 @@
 package ai.rever.boss.crash
 
 import ai.rever.boss.plugin.loader.PluginClassLoader
-import ai.rever.boss.plugin.loader.PluginUnloadRefusal
 import ai.rever.boss.plugin.pathutils.BossDirectories
 import ai.rever.boss.plugin.sandbox.PluginExecutionBoundary
 import ai.rever.boss.plugin.sandbox.ui.PluginRecoveryQuarantine
@@ -206,7 +205,7 @@ object CrashHandler {
      * coroutines when an authenticated request races an expired session — the
      * auth layer recovers on its own, see CoreAuthService.startSessionRecovery),
      * and a plugin classloader refusing a late class request after unload (see
-     * [isPluginTeardownRefusal]).
+     * [PluginTeardownRefusals]).
      * Matched by class-name suffix + message so we don't need a compile
      * dependency on ktor/coroutines here.
      */
@@ -221,7 +220,7 @@ object CrashHandler {
                     name.endsWith("CancellationException") ||
                     name == "io.github.jan.supabase.auth.exception.TokenExpiredException" ||
                     isStaleRealtimeRejoin(t) ||
-                    isPluginTeardownRefusal(t) ||
+                    PluginTeardownRefusals.matches(t) ||
                     (
                         t is java.io.IOException && (
                             msg.contains("Broken pipe", ignoreCase = true) ||
@@ -233,37 +232,6 @@ object CrashHandler {
                     )
             benign
         }
-
-    /**
-     * A plugin classloader refusing a class request after the plugin was unloaded.
-     *
-     * `PluginClassLoader` answers a late request with a [PluginUnloadRefusal] (a
-     * `ClassNotFoundException`) **on purpose** - delegating to the host would splice two class
-     * graphs together. When the request is the JVM resolving a symbolic reference in a plugin
-     * class (a `new`, a field or method reference its code reaches only now), resolution fails
-     * with a `NoClassDefFoundError` at that site, on whatever straggler thread made the request:
-     * a Ktor selector actor, a coroutine dispatcher, an AWT handler. The JVM keeps the loader's
-     * exception as that error's cause, which is how [isIgnorable]'s walk over the cause chain
-     * reaches the refusal; `PluginTeardownRefusalIntegrationTest` drives exactly that through a
-     * real loader and a real unload. Nothing is broken at that point; the refusal is the
-     * protection working, and the loader has already logged it at WARN with the straggler's stack.
-     *
-     * What followed was not benign: the refusal reached the uncaught handler during an ordinary
-     * unload - a plugin update, a reload, a sign-out - and was classified as a crash. Recovery
-     * for an already-unloaded plugin is unavailable, so [classifyCrash] resolves it to
-     * [CrashDisposition.FatalHost] and the user gets the crash dialog, whose dismissal exits
-     * BOSS. Filed three times from two different plugins and both platforms:
-     * risa-labs-inc/boss-plugin-terminal-tab#69 (terminaltab, macOS), #71 (fluckbrowser, then
-     * terminaltab - "On sign out get this"), #76 (terminaltab, Windows).
-     *
-     * Matched by the loader's own refusal type, not by its message or by `NoClassDefFoundError`
-     * in general. The loader and this handler ship in the same build, so the type cannot drift
-     * the way the sentence did (its dash changed between 9.4.0 and 9.4.13). And a class
-     * genuinely missing from a live plugin's jar arrives as a plain `ClassNotFoundException`, so
-     * it is still reported. The straggler reference remains the bug; this only stops the
-     * teardown artifact from being shown to the user as a crash.
-     */
-    internal fun isPluginTeardownRefusal(throwable: Throwable): Boolean = throwable is PluginUnloadRefusal
 
     /**
      * supabase-kt 3.8.0 can resume scheduleRejoin during the socket reconnect delay.
@@ -320,7 +288,9 @@ object CrashHandler {
         throwable: Throwable,
         writeInline: Boolean = false,
     ) {
-        if (isIgnorable(throwable)) return
+        // A teardown refusal is ignorable - no dialog, no exit - but it still leaves a report.
+        val teardownRefusal = PluginTeardownRefusals.inChain(throwable)
+        if (isIgnorable(throwable) && !teardownRefusal) return
         try {
             // Signature first, report second. createCrashReport sanitizes the whole
             // stack with a regex sweep, walks up to twelve causes asking the plugin
@@ -368,10 +338,11 @@ object CrashHandler {
             // is dropped or killed mid-write by the exit that follows - and the one
             // caller that passes true does so precisely because the record is the
             // justification for that branch existing.
+            val kind = if (teardownRefusal) ContainedKind.TEARDOWN_REFUSAL else ContainedKind.RENDER_FAULT
             if (writeInline) {
-                writeContainedReport(dir, signature, throwable, scopedPluginId)
+                writeContainedReport(dir, signature, throwable, scopedPluginId, kind)
             } else {
-                containedWriter.execute { writeContainedReport(dir, signature, throwable, scopedPluginId) }
+                containedWriter.execute { writeContainedReport(dir, signature, throwable, scopedPluginId, kind) }
             }
         } catch (e: Exception) {
             // Reporting a contained fault must never itself become a fault.
@@ -393,6 +364,7 @@ object CrashHandler {
         signature: String,
         throwable: Throwable,
         scopedPluginId: String?,
+        kind: ContainedKind,
     ) {
         try {
             val report = createCrashReport(throwable, attributePluginId(throwable, scopedPluginId))
@@ -400,11 +372,11 @@ object CrashHandler {
             // not enough — 0711 still lets others traverse to a predictable path.
             makeOwnerOnlyDir(dir)
             val file = File(dir, "contained-${report.timestamp}-$signature.txt")
-            writeOwnerOnly(file, renderContainedReport(report))
+            writeOwnerOnly(file, renderContainedReport(report, kind))
             sweepOldReports(dir)
             logger.warn(
                 LogCategory.SYSTEM,
-                "Contained render fault recorded",
+                "${kind.headline} recorded",
                 mapOf("signature" to signature, "path" to file.absolutePath),
             )
         } catch (e: Exception) {
@@ -557,9 +529,12 @@ object CrashHandler {
     }
 
     /** Plain text, so the file is useful without any tooling to read it. */
-    private fun renderContainedReport(report: CrashReport): String =
+    private fun renderContainedReport(
+        report: CrashReport,
+        kind: ContainedKind,
+    ): String =
         buildString {
-            appendLine("BOSS contained render fault")
+            appendLine("BOSS ${kind.headline.lowercase()}")
             appendLine("signature:  ${report.signature}")
             appendLine("timestamp:  ${report.timestamp}")
             appendLine("plugin:     ${report.pluginId ?: "(unattributed)"}")
@@ -568,10 +543,30 @@ object CrashHandler {
             appendLine("app:        ${report.appInfo}")
             appendLine("system:     ${report.systemInfo}")
             appendLine()
-            appendLine("This fault was contained and recovered from; the app kept running.")
+            appendLine(kind.explanation)
             appendLine()
             appendLine(report.stackTrace)
         }
+
+    /**
+     * [handleCrash]'s first step: a benign exception is logged and absorbed here, and never
+     * reaches the dialog or an exit. A plugin teardown refusal is absorbed too but still leaves a
+     * deduplicated contained report, written off-thread, because that report is the durable
+     * record of the straggler's stack. Returns whether [throwable] was absorbed.
+     */
+    internal fun absorbIgnorable(
+        thread: Thread,
+        throwable: Throwable,
+    ): Boolean {
+        if (!isIgnorable(throwable)) return false
+        logger.warn(
+            LogCategory.SYSTEM,
+            "Ignoring benign uncaught exception on thread ${thread.name}: " +
+                "${throwable.javaClass.simpleName}: ${throwable.message}",
+        )
+        if (PluginTeardownRefusals.inChain(throwable)) recordContained(throwable)
+        return true
+    }
 
     /**
      * Handle an uncaught exception.
@@ -594,14 +589,7 @@ object CrashHandler {
         // global handler routinely — e.g. hot-swapping a plugin jar drops the MCP
         // server's ktor writer with a "Broken pipe". These must NOT pop the crash
         // dialog or terminate the app; log and swallow so the app keeps running.
-        if (isIgnorable(throwable)) {
-            logger.warn(
-                LogCategory.SYSTEM,
-                "Ignoring benign uncaught exception on thread ${thread.name}: " +
-                    "${throwable.javaClass.simpleName}: ${throwable.message}",
-            )
-            return
-        }
+        if (absorbIgnorable(thread, throwable)) return
         try {
             logger.error(
                 LogCategory.SYSTEM,
@@ -1189,4 +1177,22 @@ object CrashHandler {
         logger.info(LogCategory.SYSTEM, "Triggering test crash for crash reporter verification")
         throw RuntimeException("Test crash triggered via CrashHandler.triggerTestCrash()")
     }
+}
+
+/** What a contained report on disk records, so the file says what it is. */
+internal enum class ContainedKind(
+    val headline: String,
+    val explanation: String,
+) {
+    RENDER_FAULT(
+        headline = "Contained render fault",
+        explanation = "This fault was contained and recovered from; the app kept running.",
+    ),
+    TEARDOWN_REFUSAL(
+        headline = "Plugin teardown refusal",
+        explanation =
+            "A plugin class was requested after its plugin began unloading, and the plugin classloader " +
+                "refused it. The app kept running. Something still referenced the plugin after it was " +
+                "unloaded; the stack below shows what made the request.",
+    ),
 }
